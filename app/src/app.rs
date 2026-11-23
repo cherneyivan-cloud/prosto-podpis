@@ -289,9 +289,9 @@ pub struct CryptoLineApp {
     hash_pending: Option<usize>,
     hash_rx: Option<mpsc::Receiver<(usize, String)>>,
 
-    verify_file: Option<PathBuf>,
-    verify_sig: Option<PathBuf>,
-    verify_result: Option<(bool, String)>,
+    verify_docs: Vec<PathBuf>,
+    verify_sigs: Vec<PathBuf>,
+    verify_items: Vec<VerifyItem>,
 
     confirm_delete: bool,
     titlebar_applied: bool,
@@ -300,6 +300,16 @@ pub struct CryptoLineApp {
     ctrl_a_was_down: bool,
     last_signed_dir: Option<PathBuf>,
     large_sign_files: Option<Vec<String>>,
+}
+
+/// Пара «документ — подпись» на экране массовой проверки.
+#[derive(Clone)]
+struct VerifyItem {
+    doc: Option<PathBuf>,
+    sig: Option<PathBuf>,
+    /// Сходство имён 0..1 (порог 0.8).
+    score: f32,
+    result: Option<(bool, String)>,
 }
 
 /// Сертификат, подготовленный к вызову CLI (путь к DER + владелец).
@@ -338,9 +348,9 @@ impl Default for CryptoLineApp {
             encoding: SigEncoding::Base64,
             hash_pending: None,
             hash_rx: None,
-            verify_file: None,
-            verify_sig: None,
-            verify_result: None,
+            verify_docs: Vec::new(),
+            verify_sigs: Vec::new(),
+            verify_items: Vec::new(),
             confirm_delete: false,
             titlebar_applied: false,
             logo: None,
@@ -353,14 +363,35 @@ impl Default for CryptoLineApp {
 }
 
 impl CryptoLineApp {
-    /// Открыть приложение сразу с набором документов (аргументы командной строки).
+    /// Открытие с файлами из командной строки: подписи уходят в раздел
+    /// проверки, документы — в очередь подписи (или в проверку, если есть .sig).
     pub fn with_paths(paths: Vec<PathBuf>) -> Self {
         let mut app = Self::default();
-        for path in paths {
-            if path.is_file() {
-                app.push_file(path);
+        let has_signature = paths.iter().any(|path| is_signature_path(path));
+
+        if has_signature {
+            for path in paths {
+                if !path.is_file() {
+                    continue;
+                }
+                if is_signature_path(&path) {
+                    if !app.verify_sigs.contains(&path) {
+                        app.verify_sigs.push(path);
+                    }
+                } else if !app.verify_docs.contains(&path) {
+                    app.verify_docs.push(path);
+                }
+            }
+            app.rebuild_verify_items();
+            app.active_nav = Nav::Verify;
+        } else {
+            for path in paths {
+                if path.is_file() {
+                    app.push_file(path);
+                }
             }
         }
+
         app
     }
 }
@@ -1656,109 +1687,362 @@ impl CryptoLineApp {
         page_header(
             ui,
             "Проверка ЭП",
-            "Проверьте отсоединённую подпись .sig: messageDigest и подпись сертификата",
+            "Массовая проверка: документы и подписи сопоставляются по имени, порог совпадения 80%",
         );
-        ui.add_space(20.0);
+        ui.add_space(14.0);
+
+        ui.horizontal(|ui| {
+            if accent_button(ui, "Добавить документы", Icon::Folder).clicked() {
+                if let Some(paths) = rfd::FileDialog::new()
+                    .set_title("Документы для проверки")
+                    .pick_files()
+                {
+                    for path in paths {
+                        if !self.verify_docs.contains(&path) {
+                            self.verify_docs.push(path);
+                        }
+                    }
+                    self.rebuild_verify_items();
+                }
+            }
+            if secondary_button(ui, "Добавить подписи", Icon::BadgeCheck).clicked() {
+                if let Some(paths) = rfd::FileDialog::new()
+                    .add_filter("Подписи", &["sig", "p7s", "sgn"])
+                    .set_title("Файлы подписей")
+                    .pick_files()
+                {
+                    for path in paths {
+                        if !self.verify_sigs.contains(&path) {
+                            self.verify_sigs.push(path);
+                        }
+                    }
+                    self.rebuild_verify_items();
+                }
+            }
+            if secondary_button(ui, "Очистить", Icon::Trash).clicked() {
+                self.verify_docs.clear();
+                self.verify_sigs.clear();
+                self.verify_items.clear();
+            }
+        });
+
+        ui.add_space(12.0);
+        ui.columns(2, |cols| {
+            self.verify_file_list(&mut cols[0], true);
+            self.verify_file_list(&mut cols[1], false);
+        });
+
+        ui.add_space(10.0);
+        let pairs = self
+            .verify_items
+            .iter()
+            .filter(|item| item.doc.is_some() && item.sig.is_some())
+            .count();
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "Сопоставлено пар: {} · документов: {} · подписей: {}",
+                    pairs,
+                    self.verify_docs.len(),
+                    self.verify_sigs.len()
+                ))
+                .font(theme::regular(12.0))
+                .color(TEXT_MUTED),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if accent_button(ui, "Проверить все", Icon::BadgeCheck).clicked() {
+                    self.verify_all();
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if self.verify_items.is_empty() {
+                    ui.add_space(26.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new(
+                                "Перетащите документы и файлы .sig в окно — они разложатся по разделам",
+                            )
+                            .font(theme::regular(13.0))
+                            .color(TEXT_MUTED),
+                        );
+                    });
+                }
+                for i in 0..self.verify_items.len() {
+                    self.verify_result_row(ui, i);
+                    ui.add_space(6.0);
+                }
+            });
+    }
+
+    fn verify_file_list(&mut self, ui: &mut Ui, documents: bool) {
+        let (title, hint, list) = if documents {
+            (
+                "Документы",
+                "PDF, DOCX, XML и другие файлы",
+                self.verify_docs.clone(),
+            )
+        } else {
+            ("Подписи", "Файлы .sig / .p7s", self.verify_sigs.clone())
+        };
+
+        let mut remove: Option<usize> = None;
+        egui::Frame::none()
+            .fill(BG_CARD)
+            .rounding(Rounding::same(14.0))
+            .inner_margin(Margin::same(14.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(title).font(theme::medium(14.0)).color(TEXT));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(list.len().to_string())
+                                .font(theme::regular(12.0))
+                                .color(TEXT_MUTED),
+                        );
+                    });
+                });
+                ui.add_space(6.0);
+
+                egui::ScrollArea::vertical()
+                    .max_height(140.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if list.is_empty() {
+                            ui.label(
+                                RichText::new(hint)
+                                    .font(theme::regular(11.5))
+                                    .color(TEXT_DIM),
+                            );
+                        }
+                        for (i, path) in list.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(file_display(path))
+                                            .font(theme::regular(12.0))
+                                            .color(TEXT_SOFT),
+                                    )
+                                    .truncate(true),
+                                );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if small_close(ui).clicked() {
+                                        remove = Some(i);
+                                    }
+                                    if let Ok(meta) = std::fs::metadata(path) {
+                                        ui.label(
+                                            RichText::new(format_size(meta.len()))
+                                                .font(theme::regular(11.0))
+                                                .color(TEXT_DIM),
+                                        );
+                                    }
+                                });
+                            });
+                        }
+                    });
+            });
+
+        if let Some(index) = remove {
+            if documents {
+                if index < self.verify_docs.len() {
+                    self.verify_docs.remove(index);
+                }
+            } else if index < self.verify_sigs.len() {
+                self.verify_sigs.remove(index);
+            }
+            self.rebuild_verify_items();
+        }
+    }
+
+    fn verify_result_row(&mut self, ui: &mut Ui, index: usize) {
+        let Some(item) = self.verify_items.get(index).cloned() else {
+            return;
+        };
+
+        let (icon, color) = match &item.result {
+            Some((true, _)) => (Icon::BadgeCheck, GREEN),
+            Some((false, _)) => (Icon::Close, RED),
+            None => (Icon::File, TEXT_DIM),
+        };
 
         egui::Frame::none()
             .fill(BG_CARD)
-            .rounding(Rounding::same(16.0))
-            .inner_margin(Margin::same(20.0))
+            .rounding(Rounding::same(12.0))
+            .inner_margin(Margin::same(12.0))
             .show(ui, |ui| {
-                ui.set_width(ui.available_width().min(720.0));
-                ui.label(
-                    RichText::new("Документ")
-                        .font(theme::regular(12.5))
-                        .color(TEXT_MUTED),
-                );
-                ui.add_space(4.0);
+                ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    if secondary_button(ui, "Выбрать документ", Icon::File).clicked() {
-                        if let Some(p) = rfd::FileDialog::new()
-                            .set_title("Документ для проверки")
-                            .pick_file()
-                        {
-                            self.verify_file = Some(p);
-                            self.verify_result = None;
-                        }
-                    }
-                    if let Some(p) = &self.verify_file {
-                        ui.label(
-                            RichText::new(file_display(p))
-                                .font(theme::regular(13.0))
-                                .color(TEXT_SOFT),
-                        );
-                    }
-                });
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                    icons::paint(ui.painter(), rect, icon, color, 1.8);
+                    ui.add_space(6.0);
 
-                ui.add_space(12.0);
-                ui.label(
-                    RichText::new("Файл подписи")
-                        .font(theme::regular(12.5))
-                        .color(TEXT_MUTED),
-                );
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if secondary_button(ui, "Выбрать .sig", Icon::BadgeCheck).clicked() {
-                        if let Some(p) = rfd::FileDialog::new()
-                            .add_filter("Подпись", &["sig", "p7s"])
-                            .set_title("Файл подписи")
-                            .pick_file()
-                        {
-                            self.verify_sig = Some(p);
-                            self.verify_result = None;
-                        }
-                    }
-                    if let Some(p) = &self.verify_sig {
+                    ui.vertical(|ui| {
+                        let doc_name = item
+                            .doc
+                            .as_ref()
+                            .map(|path| file_display(path))
+                            .unwrap_or_else(|| "Нет документа".to_string());
                         ui.label(
-                            RichText::new(file_display(p))
-                                .font(theme::regular(13.0))
-                                .color(TEXT_SOFT),
+                            RichText::new(doc_name)
+                                .font(theme::medium(13.0))
+                                .color(TEXT),
                         );
-                    }
-                });
 
-                ui.add_space(18.0);
-                if accent_button(ui, "Проверить подпись", Icon::BadgeCheck).clicked() {
-                    self.run_verify();
-                }
-            });
-
-        if let Some((ok, detail)) = self.verify_result.clone() {
-            ui.add_space(16.0);
-            egui::Frame::none()
-                .fill(BG_CARD)
-                .rounding(Rounding::same(14.0))
-                .inner_margin(Margin::same(18.0))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                        icons::paint(
-                            ui.painter(),
-                            r,
-                            if ok { Icon::BadgeCheck } else { Icon::Close },
-                            if ok { GREEN } else { RED },
-                            1.8,
-                        );
-                        ui.add_space(6.0);
+                        let sig_line = match (&item.sig, item.doc.is_some()) {
+                            (Some(sig), true) => format!(
+                                "{} · совпадение {:.0}%",
+                                file_display(sig),
+                                item.score * 100.0
+                            ),
+                            (Some(sig), false) => {
+                                format!("{} · нет документа", file_display(sig))
+                            }
+                            (None, _) => "подпись не найдена".to_string(),
+                        };
                         ui.label(
-                            RichText::new(if ok {
-                                "Подпись верна"
+                            RichText::new(sig_line)
+                                .font(theme::regular(11.5))
+                                .color(TEXT_MUTED),
+                        );
+
+                        if let Some((ok, detail)) = &item.result {
+                            let summary = if *ok {
+                                "Подпись верна".to_string()
                             } else {
-                                "Подпись недействительна"
-                            })
-                            .font(theme::medium(15.0))
-                            .color(if ok { GREEN } else { RED }),
-                        );
+                                detail.lines().next().unwrap_or("Ошибка").to_string()
+                            };
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(summary)
+                                        .font(theme::regular(11.5))
+                                        .color(if *ok { GREEN } else { RED }),
+                                )
+                                .truncate(true),
+                            )
+                            .on_hover_text(detail.clone());
+                        }
                     });
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(detail)
-                            .font(theme::mono(11.5))
-                            .color(TEXT_MUTED),
-                    );
                 });
+            });
+    }
+
+    /// Проверяет все сопоставленные пары.
+    fn verify_all(&mut self) {
+        let pairs = self
+            .verify_items
+            .iter()
+            .filter(|item| item.doc.is_some() && item.sig.is_some())
+            .count();
+        if pairs == 0 {
+            self.message = "Нет сопоставленных пар (порог совпадения 80%)".to_string();
+            return;
         }
+
+        let mut ok_count = 0usize;
+        let mut fail_count = 0usize;
+        let mut limit_skipped = 0usize;
+
+        for index in 0..self.verify_items.len() {
+            let (Some(doc), Some(sig)) = (
+                self.verify_items[index].doc.clone(),
+                self.verify_items[index].sig.clone(),
+            ) else {
+                continue;
+            };
+
+            if let Err(error) = verify_size_error(&doc, &sig) {
+                self.verify_items[index].result = Some((false, error));
+                limit_skipped += 1;
+                continue;
+            }
+
+            let (ok, detail) = run_verify_cli(&self.cli_path(), &doc, &sig);
+            let detail = detail.replace('✓', "•").replace('✗', "×");
+            if ok {
+                if let Some(new_path) = self.rename_after_verify(&doc, &sig, &detail) {
+                    self.verify_items[index].sig = Some(new_path.clone());
+                    if let Some(pos) = self.verify_sigs.iter().position(|p| p == &sig) {
+                        self.verify_sigs[pos] = new_path;
+                    }
+                }
+                ok_count += 1;
+            } else {
+                fail_count += 1;
+            }
+            self.verify_items[index].result = Some((ok, detail));
+        }
+
+        self.message = format!(
+            "Проверка: верных {} · ошибок {} · пропущено по лимиту {}",
+            ok_count, fail_count, limit_skipped
+        );
+    }
+
+    /// Пересобирает пары по сходству имён (порог 80%).
+    fn rebuild_verify_items(&mut self) {
+        let docs = self.verify_docs.clone();
+        let sigs = self.verify_sigs.clone();
+        let mut items: Vec<VerifyItem> = Vec::new();
+        let mut doc_matched = vec![false; docs.len()];
+
+        for sig in &sigs {
+            let sig_key = verify_name_key(sig, true);
+            let mut best: Option<(usize, f32)> = None;
+            for (doc_index, doc) in docs.iter().enumerate() {
+                let doc_key = verify_name_key(doc, false);
+                let score = name_similarity(&sig_key, &doc_key);
+                if score >= 0.8 && best.map_or(true, |(_, best_score)| score > best_score) {
+                    best = Some((doc_index, score));
+                }
+            }
+
+            match best {
+                Some((doc_index, score)) => {
+                    doc_matched[doc_index] = true;
+                    items.push(VerifyItem {
+                        doc: Some(docs[doc_index].clone()),
+                        sig: Some(sig.clone()),
+                        score,
+                        result: None,
+                    });
+                }
+                None => items.push(VerifyItem {
+                    doc: None,
+                    sig: Some(sig.clone()),
+                    score: 0.0,
+                    result: None,
+                }),
+            }
+        }
+
+        for (doc_index, doc) in docs.iter().enumerate() {
+            if !doc_matched[doc_index] {
+                items.push(VerifyItem {
+                    doc: Some(doc.clone()),
+                    sig: None,
+                    score: 0.0,
+                    result: None,
+                });
+            }
+        }
+
+        items.sort_by(|a, b| {
+            let name = |item: &VerifyItem| {
+                item.doc
+                    .as_ref()
+                    .or(item.sig.as_ref())
+                    .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_lowercase())
+                    .unwrap_or_default()
+            };
+            (name(a), a.sig.is_none()).cmp(&(name(b), b.sig.is_none()))
+        });
+
+        self.verify_items = items;
     }
 
     fn zip_screen(&mut self, ui: &mut Ui) {
@@ -2055,14 +2339,42 @@ impl CryptoLineApp {
                 .dropped_files
                 .iter()
                 .filter_map(|f| f.path.clone())
+                .filter(|path| path.is_file())
                 .collect()
         });
         if dropped.is_empty() {
             return;
         }
+
+        let has_signature = dropped.iter().any(|path| is_signature_path(path));
+        let on_verify = self.active_nav == Nav::Verify;
+
+        // Если в наборе есть подписи — весь набор идёт на проверку:
+        // документы в один раздел, подписи в другой.
+        if has_signature || on_verify {
+            let mut added = 0;
+            for path in dropped {
+                if is_signature_path(&path) {
+                    if !self.verify_sigs.contains(&path) {
+                        self.verify_sigs.push(path);
+                        added += 1;
+                    }
+                } else if !self.verify_docs.contains(&path) {
+                    self.verify_docs.push(path);
+                    added += 1;
+                }
+            }
+            if added > 0 {
+                self.rebuild_verify_items();
+                self.active_nav = Nav::Verify;
+                self.message = format!("Добавлено для проверки: {}", added);
+            }
+            return;
+        }
+
         let mut added = 0;
-        for p in dropped {
-            if self.push_file(p) {
+        for path in dropped {
+            if self.push_file(path) {
                 added += 1;
             }
         }
@@ -2099,17 +2411,28 @@ impl CryptoLineApp {
             ACCENT,
             2.0,
         );
+        let (title, hint) = if self.active_nav == Nav::Verify {
+            (
+                "Отпустите файлы для проверки",
+                "Документы и подписи .sig разложатся по разделам",
+            )
+        } else {
+            (
+                "Отпустите файлы, чтобы добавить",
+                "PDF, DOCX, XML, TXT и другие документы",
+            )
+        };
         p.text(
             screen.center() + Vec2::new(0.0, 22.0),
             Align2::CENTER_CENTER,
-            "Отпустите файлы, чтобы добавить",
+            title,
             theme::medium(20.0),
             TEXT,
         );
         p.text(
             screen.center() + Vec2::new(0.0, 48.0),
             Align2::CENTER_CENTER,
-            "PDF, DOCX, XML, TXT и другие документы",
+            hint,
             theme::regular(13.0),
             TEXT_MUTED,
         );
@@ -2974,39 +3297,6 @@ impl CryptoLineApp {
             return;
         };
         self.verify_pair(file.path.clone(), sig);
-    }
-
-    fn run_verify(&mut self) {
-        let (Some(file), Some(sig)) = (self.verify_file.clone(), self.verify_sig.clone()) else {
-            self.verify_result = Some((false, "Выберите документ и файл подписи".to_string()));
-            return;
-        };
-        if let Err(error) = verify_size_error(&file, &sig) {
-            self.verify_result = Some((false, error));
-            return;
-        }
-
-        let (ok, detail) = run_verify_cli(&self.cli_path(), &file, &sig);
-        if ok {
-            let renamed = self.rename_after_verify(&file, &sig, &detail);
-            if let Some(path) = &renamed {
-                self.verify_sig = Some(path.clone());
-            }
-            let detail = detail.replace('✓', "•").replace('✗', "×");
-            let extra = renamed
-                .as_ref()
-                .map(|path| {
-                    format!(
-                        "\nФайл подписи переименован: {}",
-                        file_display(path)
-                    )
-                })
-                .unwrap_or_default();
-            self.verify_result = Some((true, format!("{}{}", detail, extra)));
-        } else {
-            let detail = detail.replace('✓', "•").replace('✗', "×");
-            self.verify_result = Some((false, detail));
-        }
     }
 
     fn verify_pair(&mut self, file: PathBuf, sig: PathBuf) {
@@ -3927,6 +4217,78 @@ fn file_display(path: &Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string()
+}
+
+/// Файл подписи по расширению.
+fn is_signature_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("sig") | Some("p7s") | Some("sgn")
+    )
+}
+
+/// Ключ имени для сопоставления: без расширений, только буквы и цифры.
+fn verify_name_key(path: &Path, is_signature: bool) -> String {
+    let mut name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if is_signature {
+        for ext in [".sig", ".p7s", ".sgn"] {
+            if name.ends_with(ext) {
+                name.truncate(name.len() - ext.len());
+                break;
+            }
+        }
+    }
+    for ext in [
+        ".pdf", ".docx", ".doc", ".xml", ".txt", ".rtf", ".odt", ".xlsx", ".xls", ".zip",
+    ] {
+        if name.ends_with(ext) {
+            name.truncate(name.len() - ext.len());
+            break;
+        }
+    }
+
+    name.chars().filter(|ch| ch.is_alphanumeric()).collect()
+}
+
+/// Сходство строк 0..1 по Левенштейну.
+fn name_similarity(a: &str, b: &str) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let max_len = a_chars.len().max(b_chars.len());
+    if max_len == 0 {
+        return 1.0;
+    }
+    let distance = levenshtein(&a_chars, &b_chars);
+    1.0 - distance as f32 / max_len as f32
+}
+
+fn levenshtein(a: &[char], b: &[char]) -> usize {
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0usize; b.len() + 1];
+
+    for (i, a_char) in a.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, b_char) in b.iter().enumerate() {
+            let cost = if a_char == b_char { 0 } else { 1 };
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    previous[b.len()]
 }
 
 /// Строгий лимит проверки: документ и файл подписи не больше 80 МБ.
