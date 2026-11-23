@@ -26,6 +26,9 @@ const VERIFY_MAX_BYTES: u64 = 80 * 1024 * 1024;
 const CAPTION_BUTTON_W: f32 = 46.0;
 const CAPTION_BUTTON_H: f32 = 34.0;
 
+/// Длительность заставки при запуске, секунды.
+const SPLASH_LEN: f32 = 2.7;
+
 // ---------------------------------------------------------------------------
 // Модель данных
 // ---------------------------------------------------------------------------
@@ -301,6 +304,9 @@ pub struct CryptoLineApp {
     confirm_delete: bool,
     titlebar_applied: bool,
     logo: Option<egui::TextureHandle>,
+    sig_tex: Option<egui::TextureHandle>,
+    splash_start: Option<f64>,
+    splash_skip: bool,
     resize_drag: Option<ResizeDrag>,
     ctrl_a_was_down: bool,
     last_signed_dir: Option<PathBuf>,
@@ -363,6 +369,9 @@ impl Default for CryptoLineApp {
             confirm_delete: false,
             titlebar_applied: false,
             logo: None,
+            sig_tex: None,
+            splash_start: None,
+            splash_skip: false,
             resize_drag: None,
             ctrl_a_was_down: false,
             last_signed_dir: None,
@@ -426,6 +435,21 @@ impl eframe::App for CryptoLineApp {
         }
         self.poll_hash();
         self.handle_dropped(ctx);
+
+        // Заставка: пока она видна, остальной интерфейс не рисуем и не опрашиваем.
+        if !self.splash_skip {
+            let now = ctx.input(|i| i.time);
+            let start = *self.splash_start.get_or_insert(now);
+            let t = (now - start) as f32;
+            if t < SPLASH_LEN {
+                if ctx.input(|i| i.pointer.any_click() || i.key_pressed(egui::Key::Escape)) {
+                    self.splash_skip = true;
+                } else {
+                    self.draw_splash(ctx, t);
+                    return;
+                }
+            }
+        }
 
         if self.hash_pending.is_some() {
             ctx.request_repaint_after(Duration::from_millis(120));
@@ -530,6 +554,126 @@ impl eframe::App for CryptoLineApp {
 // ---------------------------------------------------------------------------
 
 impl CryptoLineApp {
+    /// Анимированный логотип-заставка: контур листа → росчерк → строки → пульс.
+    fn draw_splash(&mut self, ctx: &egui::Context, t: f32) {
+        let fade = ((SPLASH_LEN - t) / 0.45).clamp(0.0, 1.0);
+        let screen = ctx.screen_rect();
+        let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("splash"));
+        let p = ctx.layer_painter(layer);
+        p.rect_filled(screen, 0.0, fade_col(BG_WINDOW, fade));
+
+        // лёгкий импульс на этапе подтверждения
+        let pulse = if (1.4..1.75).contains(&t) {
+            1.0 + 0.030 * (((t - 1.4) / 0.35) * std::f32::consts::PI).sin()
+        } else {
+            1.0
+        };
+        let page_h = 240.0 * pulse;
+        let page_w = page_h * 0.623;
+        let page = Rect::from_center_size(
+            screen.center() + Vec2::new(0.0, -6.0),
+            Vec2::new(page_w, page_h),
+        );
+
+        // 1. контур листа по часовой стрелке
+        let fp = (t / 0.4).clamp(0.0, 1.0);
+        if fp > 0.0 {
+            let pts = rounded_rect_path(page, page_w * 0.095);
+            let total: f32 = pts.windows(2).map(|w| w[0].distance(w[1])).sum();
+            let mut acc = 0.0f32;
+            let mut out: Vec<Pos2> = Vec::with_capacity(pts.len());
+            for w in pts.windows(2) {
+                let seg = w[0].distance(w[1]);
+                if acc + seg >= total * fp {
+                    let k = ((total * fp - acc) / seg.max(1e-4)).clamp(0.0, 1.0);
+                    out.push(w[0]);
+                    out.push(Pos2::new(
+                        w[0].x + (w[1].x - w[0].x) * k,
+                        w[0].y + (w[1].y - w[0].y) * k,
+                    ));
+                    break;
+                }
+                out.push(w[0]);
+                acc += seg;
+            }
+            if out.len() > 1 {
+                p.add(egui::Shape::line(
+                    out,
+                    Stroke::new(page_w * 0.075, fade_col(ACCENT, fade)),
+                ));
+            }
+        }
+
+        // 2. росчерк: мягкая волна слева направо
+        if t > 0.4 {
+            let tex = self
+                .sig_tex
+                .get_or_insert_with(|| {
+                    ctx.load_texture(
+                        "app_sig",
+                        egui::ColorImage::from_rgba_unmultiplied(
+                            [crate::SIG_W as usize, crate::SIG_H as usize],
+                            crate::SIG_RGBA,
+                        ),
+                        egui::TextureOptions::LINEAR,
+                    )
+                })
+                .clone();
+            let sp = ((t - 0.4) / 0.7).clamp(0.0, 1.0);
+            let sig_rect = Rect::from_min_max(
+                Pos2::new(
+                    page.left() + page.width() * 0.164,
+                    page.top() + page.height() * 0.285,
+                ),
+                Pos2::new(
+                    page.left() + page.width() * 1.21,
+                    page.top() + page.height() * 0.695,
+                ),
+            );
+            let steps = 56;
+            for i in 0..steps {
+                let f0 = i as f32 / steps as f32;
+                let f1 = (i + 1) as f32 / steps as f32;
+                let a = ((sp * 1.15 - f0) / 0.14).clamp(0.0, 1.0) * fade;
+                if a <= 0.004 {
+                    continue;
+                }
+                let x0 = sig_rect.left() + sig_rect.width() * f0;
+                let x1 = sig_rect.left() + sig_rect.width() * f1;
+                p.image(
+                    tex.id(),
+                    Rect::from_min_max(
+                        Pos2::new(x0, sig_rect.top()),
+                        Pos2::new(x1, sig_rect.bottom()),
+                    ),
+                    Rect::from_min_max(Pos2::new(f0, 0.0), Pos2::new(f1, 1.0)),
+                    Color32::from_white_alpha((a * 255.0) as u8),
+                );
+            }
+        }
+
+        // 3. строки документа
+        if t > 1.1 {
+            let a = ((t - 1.1) / 0.3).clamp(0.0, 1.0) * fade;
+            let lh = page.height() * 0.028;
+            for (x0, x1, y) in [(0.151, 0.840, 0.776), (0.151, 0.670, 0.851)] {
+                let r = Rect::from_min_max(
+                    Pos2::new(
+                        page.left() + page.width() * x0,
+                        page.top() + page.height() * y,
+                    ),
+                    Pos2::new(
+                        page.left() + page.width() * x1,
+                        page.top() + page.height() * y + lh,
+                    ),
+                );
+                p.rect_filled(r, lh / 2.0, fade_col(TEXT_MUTED, a));
+            }
+        }
+
+        ctx.request_repaint();
+    }
+
     fn sidebar(&mut self, ui: &mut Ui) {
         // Область логотипа можно тянуть — окно без системного заголовка.
         let drag_rect = Rect::from_min_size(
@@ -550,23 +694,26 @@ impl CryptoLineApp {
             ui.add_space(18.0);
             let texture = self.logo.get_or_insert_with(|| {
                 ui.ctx().load_texture(
-                    "app_icon",
+                    "app_logo",
                     egui::ColorImage::from_rgba_unmultiplied(
-                        [crate::ICON_SIZE as usize, crate::ICON_SIZE as usize],
-                        crate::ICON_RGBA,
+                        [crate::LOGO_W as usize, crate::LOGO_H as usize],
+                        crate::LOGO_RGBA,
                     ),
                     egui::TextureOptions::LINEAR,
                 )
             });
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(42.0), Sense::hover());
+            // Логотип — вертикальный лист: высота фиксирована, ширина по пропорции.
+            let logo_h = 36.0;
+            let logo_w = logo_h * crate::LOGO_W as f32 / crate::LOGO_H as f32;
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(logo_w + 2.0, 44.0), Sense::hover());
+            let logo_rect = Rect::from_center_size(rect.center(), Vec2::new(logo_w, logo_h));
             ui.painter().image(
                 texture.id(),
-                rect,
+                logo_rect,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
-            ui.add_space(8.0);
-            ui.add_space(4.0);
+            ui.add_space(11.0);
             ui.label(
                 RichText::new("Просто Подпись")
                     .font(theme::medium(15.5))
@@ -574,7 +721,7 @@ impl CryptoLineApp {
             );
         });
 
-        ui.add_space(30.0);
+        ui.add_space(26.0);
 
         for nav in [
             Nav::Docs,
@@ -3606,9 +3753,7 @@ impl CryptoLineApp {
 
 // ---------------------------------------------------------------------------
 // Разбор DN
-// ---------------------------------------------------------------------------
-
-/// Делит DN по запятым, не трогая запятые внутри кавычек и после `\`.
+// ---------------------------------------------------------------------------/// Делит DN по запятым, не трогая запятые внутри кавычек и после `\`.
 fn split_dn(dn: &str) -> Vec<&str> {
     let bytes = dn.as_bytes();
     let mut parts = Vec::new();
@@ -3643,6 +3788,34 @@ fn unquote_dn_value(raw: &str) -> String {
         value
     };
     inner.replace("\"\"", "\"").trim().to_string()
+}
+
+/// Точки контура скруглённого прямоугольника (по часовой стрелке).
+fn rounded_rect_path(rect: Rect, r: f32) -> Vec<Pos2> {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let mut pts = Vec::new();
+    let r = r.min(rect.width() / 2.0).min(rect.height() / 2.0).max(0.0);
+    let corners = [
+        (Pos2::new(rect.right() - r, rect.top() + r), -FRAC_PI_2),
+        (Pos2::new(rect.right() - r, rect.bottom() - r), 0.0),
+        (Pos2::new(rect.left() + r, rect.bottom() - r), FRAC_PI_2),
+        (Pos2::new(rect.left() + r, rect.top() + r), PI),
+    ];
+    for (c, start) in corners {
+        for i in 0..=8 {
+            let a = start + FRAC_PI_2 * (i as f32 / 8.0);
+            pts.push(Pos2::new(c.x + r * a.cos(), c.y + r * a.sin()));
+        }
+    }
+    if let Some(first) = pts.first().copied() {
+        pts.push(first);
+    }
+    pts
+}
+
+/// Цвет с масштабированной прозрачностью.
+fn fade_col(c: Color32, f: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * f.clamp(0.0, 1.0)) as u8)
 }
 
 // ---------------------------------------------------------------------------

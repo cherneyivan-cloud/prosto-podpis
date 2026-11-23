@@ -12,6 +12,14 @@ use eframe::egui;
 /// Иконка приложения: RGBA 256×256, сгенерирована из assets/app_icon.png.
 pub(crate) const ICON_RGBA: &[u8] = include_bytes!("../assets/app_icon_256.rgba");
 pub(crate) const ICON_SIZE: u32 = 256;
+/// Логотип для сайдбара: обрезанный по содержимому, RGBA 192×255.
+pub(crate) const LOGO_RGBA: &[u8] = include_bytes!("../assets/app_logo.rgba");
+pub(crate) const LOGO_W: u32 = 192;
+pub(crate) const LOGO_H: u32 = 255;
+/// Маска росчерка для анимации заставки: белая, RGBA 420×265.
+pub(crate) const SIG_RGBA: &[u8] = include_bytes!("../assets/app_sig.rgba");
+pub(crate) const SIG_W: u32 = 420;
+pub(crate) const SIG_H: u32 = 265;
 
 fn main() -> Result<(), eframe::Error> {
     // Пути к документам можно передать аргументами (например, «Открыть с помощью»).
@@ -25,7 +33,7 @@ fn main() -> Result<(), eframe::Error> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([1120.0, 700.0])
-            .with_title("Просто подпись")
+            .with_title("Просто Подпись")
             .with_decorations(false)
             .with_resizable(true)
             .with_icon(egui::IconData {
