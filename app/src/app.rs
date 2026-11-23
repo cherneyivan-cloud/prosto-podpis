@@ -19,6 +19,9 @@ use crate::theme::{self, *};
 /// Файлы больше 50 МБ подписываем только после подтверждения.
 const LARGE_FILE_BYTES: u64 = 50 * 1024 * 1024;
 
+/// Строгая проверка подписей — не больше 80 МБ на файл.
+const VERIFY_MAX_BYTES: u64 = 80 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Модель данных
 // ---------------------------------------------------------------------------
@@ -2978,17 +2981,108 @@ impl CryptoLineApp {
             self.verify_result = Some((false, "Выберите документ и файл подписи".to_string()));
             return;
         };
+        if let Err(error) = verify_size_error(&file, &sig) {
+            self.verify_result = Some((false, error));
+            return;
+        }
+
         let (ok, detail) = run_verify_cli(&self.cli_path(), &file, &sig);
-        self.verify_result = Some((ok, detail));
+        if ok {
+            let renamed = self.rename_after_verify(&file, &sig, &detail);
+            if let Some(path) = &renamed {
+                self.verify_sig = Some(path.clone());
+            }
+            let detail = detail.replace('✓', "•").replace('✗', "×");
+            let extra = renamed
+                .as_ref()
+                .map(|path| {
+                    format!(
+                        "\nФайл подписи переименован: {}",
+                        file_display(path)
+                    )
+                })
+                .unwrap_or_default();
+            self.verify_result = Some((true, format!("{}{}", detail, extra)));
+        } else {
+            let detail = detail.replace('✓', "•").replace('✗', "×");
+            self.verify_result = Some((false, detail));
+        }
     }
 
     fn verify_pair(&mut self, file: PathBuf, sig: PathBuf) {
+        if let Err(error) = verify_size_error(&file, &sig) {
+            self.message = error;
+            return;
+        }
+
         let (ok, detail) = run_verify_cli(&self.cli_path(), &file, &sig);
-        self.message = if ok {
-            format!("Подпись верна · {}", file_display(&file))
+        if ok {
+            let renamed = self.rename_after_verify(&file, &sig, &detail);
+            if let Some(parent) = file.parent() {
+                let parent = parent.to_path_buf();
+                let _ = self.write_reports(&parent);
+            }
+            self.message = match renamed {
+                Some(path) => format!(
+                    "Подпись верна · файл подписи: {}",
+                    file_display(&path)
+                ),
+                None => format!("Подпись верна · {}", file_display(&file)),
+            };
         } else {
-            format!("Подпись недействительна · {}", detail)
-        };
+            self.message = format!("Подпись недействительна · {}", detail);
+        }
+    }
+
+    /// После успешной проверки переименовывает подпись в
+    /// `<имя документа>_<Фамилия_ИО>.<ext>`.
+    fn rename_after_verify(
+        &mut self,
+        doc: &Path,
+        sig: &Path,
+        detail: &str,
+    ) -> Option<PathBuf> {
+        let owner = owner_from_verify_detail(detail)?;
+        let stem = doc.file_stem().and_then(|s| s.to_str())?;
+        if stem.is_empty() {
+            return None;
+        }
+        let ext = sig.extension().and_then(|e| e.to_str()).unwrap_or("sig");
+        let dir = sig.parent()?;
+
+        let mut target = dir.join(format!("{}_{}.{}", stem, owner, ext));
+        if target == sig {
+            return None;
+        }
+        if target.exists() {
+            let mut n = 2;
+            loop {
+                let candidate =
+                    dir.join(format!("{}_{}_{}.{}", stem, owner, n, ext));
+                if !candidate.exists() {
+                    target = candidate;
+                    break;
+                }
+                n += 1;
+                if n > 999 {
+                    return None;
+                }
+            }
+        }
+
+        if std::fs::rename(sig, &target).is_err() {
+            return None;
+        }
+
+        for file in &mut self.files {
+            for signature in &mut file.signatures {
+                if signature.path.as_deref() == Some(sig) {
+                    signature.path = Some(target.clone());
+                }
+            }
+        }
+
+        Some(target)
     }
 
     fn build_zip(&mut self, dir: PathBuf, indices: Vec<usize>) {
@@ -3833,6 +3927,114 @@ fn file_display(path: &Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string()
+}
+
+/// Строгий лимит проверки: документ и файл подписи не больше 80 МБ.
+fn verify_size_error(doc: &Path, sig: &Path) -> Result<(), String> {
+    for (path, label) in [(doc, "Документ"), (sig, "Файл подписи")] {
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.len() > VERIFY_MAX_BYTES {
+                return Err(format!(
+                    "{} больше 80 МБ — строгая проверка не выполняется: {}",
+                    label,
+                    file_display(path)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Владелец подписи из вывода verify: «Фамилия_ИО».
+fn owner_from_verify_detail(detail: &str) -> Option<String> {
+    let line = detail
+        .lines()
+        .find(|line| line.contains("SURNAME=") || line.contains("CN="))?;
+
+    let surname = field_value(line, "SURNAME=");
+    let given = field_value(line, "GIVENNAME=");
+    let cn = field_value(line, "CN=").unwrap_or_default();
+
+    let (surname, given) = match (surname, given) {
+        (Some(surname), Some(given)) => (surname, given),
+        (Some(surname), None) => {
+            let words: Vec<&str> = cn.split_whitespace().collect();
+            let given = if words.len() > 1 {
+                words[1..].join(" ")
+            } else {
+                String::new()
+            };
+            (surname, given)
+        }
+        (None, Some(given)) => {
+            let surname = cn.split_whitespace().next()?.to_string();
+            (surname, given)
+        }
+        (None, None) => {
+            if cn.is_empty() {
+                return None;
+            }
+            let words: Vec<&str> = cn.split_whitespace().collect();
+            let surname = words.first()?.to_string();
+            let given = if words.len() > 1 {
+                words[1..].join(" ")
+            } else {
+                String::new()
+            };
+            (surname, given)
+        }
+    };
+
+    let surname = owner_title(&surname);
+    if surname.is_empty() {
+        return None;
+    }
+
+    let initials: String = given
+        .split_whitespace()
+        .filter_map(|word| word.chars().find(|ch| ch.is_alphabetic()))
+        .take(2)
+        .map(|ch| ch.to_uppercase().to_string())
+        .collect();
+
+    if initials.is_empty() {
+        Some(surname)
+    } else {
+        Some(format!("{}_{}", surname, initials))
+    }
+}
+
+fn field_value(line: &str, key: &str) -> Option<String> {
+    let start = line.find(key)? + key.len();
+    let rest = &line[start..];
+    let end = rest.find(',').unwrap_or(rest.len());
+    let value = rest[..end].trim().trim_matches('"').to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn owner_title(value: &str) -> String {
+    let mut out = String::new();
+    let mut capitalize = true;
+    for ch in value.trim().chars() {
+        if ch.is_alphabetic() {
+            if capitalize {
+                out.extend(ch.to_uppercase());
+                capitalize = false;
+            } else {
+                out.extend(ch.to_lowercase());
+            }
+        } else {
+            out.push(ch);
+            if ch == '-' || ch == ' ' {
+                capitalize = true;
+            }
+        }
+    }
+    out.trim_matches('"').trim().to_string()
 }
 
 fn run_verify_cli(cli: &Path, file: &Path, sig: &Path) -> (bool, String) {
