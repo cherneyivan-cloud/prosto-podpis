@@ -9,7 +9,6 @@ name = "Podpis"
 path = "src/main.rs"
 
 [dependencies]
-# GUI
 egui = "0.27"
 eframe = "0.27"
 rfd = "0.14"  # Диалоги файлов
@@ -22,6 +21,9 @@ sha2 = "0.10"
 zip = "0.6"
 chrono = "0.4"
 base64 = "0.22"
+
+[build-dependencies]
+winres = "0.1"
 
 [profile.release]
 opt-level = 3

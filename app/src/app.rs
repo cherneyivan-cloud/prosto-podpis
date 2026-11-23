@@ -300,6 +300,9 @@ pub struct CryptoLineApp {
     ctrl_a_was_down: bool,
     last_signed_dir: Option<PathBuf>,
     large_sign_files: Option<Vec<String>>,
+    update_latest: Option<String>,
+    update_url: Option<String>,
+    update_error: Option<String>,
 }
 
 /// Пара «документ — подпись» на экране массовой проверки.
@@ -358,6 +361,9 @@ impl Default for CryptoLineApp {
             ctrl_a_was_down: false,
             last_signed_dir: None,
             large_sign_files: None,
+            update_latest: None,
+            update_url: None,
+            update_error: None,
         }
     }
 }
@@ -2161,7 +2167,12 @@ impl CryptoLineApp {
                     true,
                 );
                 ui.add_space(10.0);
-                setting_row(ui, "Версия", "Просто подпись 1.0 · egui", true);
+                setting_row(
+                    ui,
+                    "Версия",
+                    &format!("Просто подпись {} · egui", env!("CARGO_PKG_VERSION")),
+                    true,
+                );
                 ui.add_space(10.0);
                 setting_row(ui, "Провайдер", "PROV_GOST_2012_256 · CALG_GR3411_2012_256", true);
 
@@ -2187,6 +2198,145 @@ impl CryptoLineApp {
                     }
                 });
             });
+
+        ui.add_space(16.0);
+        egui::Frame::none()
+            .fill(BG_CARD)
+            .rounding(Rounding::same(16.0))
+            .inner_margin(Margin::same(20.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width().min(720.0));
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("Обновления")
+                                .font(theme::medium(15.0))
+                                .color(TEXT),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "Текущая версия: {}",
+                                env!("CARGO_PKG_VERSION")
+                            ))
+                            .font(theme::regular(12.0))
+                            .color(TEXT_MUTED),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if accent_button(ui, "Проверить обновления", Icon::Download)
+                            .clicked()
+                        {
+                            self.check_updates();
+                        }
+                    });
+                });
+
+                ui.add_space(8.0);
+                if let Some(error) = self.update_error.clone() {
+                    ui.label(
+                        RichText::new(error)
+                            .font(theme::regular(12.0))
+                            .color(RED),
+                    );
+                }
+                if let Some(latest) = self.update_latest.clone() {
+                    if version_is_newer(&latest, env!("CARGO_PKG_VERSION")) {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("Доступна версия {}", latest))
+                                    .font(theme::medium(13.0))
+                                    .color(AMBER),
+                            );
+                            if let Some(url) = self.update_url.clone() {
+                                if secondary_button(ui, "Открыть страницу", Icon::Download)
+                                    .clicked()
+                                {
+                                    open_external(&url);
+                                }
+                            }
+                        });
+                    } else {
+                        ui.label(
+                            RichText::new(format!(
+                                "Установлена последняя версия ({})",
+                                latest
+                            ))
+                            .font(theme::regular(12.5))
+                            .color(GREEN),
+                        );
+                    }
+                }
+            });
+
+        ui.add_space(16.0);
+        egui::Frame::none()
+            .fill(BG_CARD)
+            .rounding(Rounding::same(16.0))
+            .inner_margin(Margin::same(20.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width().min(720.0));
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("Инструкция")
+                                .font(theme::medium(15.0))
+                                .color(TEXT),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new("PDF со скриншотами и подсказками")
+                                .font(theme::regular(12.0))
+                                .color(TEXT_MUTED),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if secondary_button(ui, "Открыть инструкцию", Icon::File).clicked()
+                        {
+                            let path = self.manual_path();
+                            if path.exists() {
+                                open_external(&path.display().to_string());
+                            } else {
+                                self.message =
+                                    "Инструкция не найдена рядом с программой".to_string();
+                            }
+                        }
+                    });
+                });
+            });
+    }
+
+    fn manual_path(&self) -> PathBuf {
+        self.cli_path()
+            .parent()
+            .map(|dir| dir.join("Просто подпись — инструкция.pdf"))
+            .unwrap_or_else(|| PathBuf::from("Просто подпись — инструкция.pdf"))
+    }
+
+    fn check_updates(&mut self) {
+        self.update_error = None;
+        self.update_latest = None;
+        self.update_url = None;
+
+        match fetch_update_manifest() {
+            Some(json) => {
+                let latest = json_string(&json, "version").unwrap_or_default();
+                if latest.is_empty() {
+                    self.update_error =
+                        Some("Некорректный ответ сервера обновлений".to_string());
+                    return;
+                }
+                let url = json_string(&json, "url").unwrap_or_default();
+                self.update_latest = Some(latest);
+                self.update_url = if url.is_empty() { None } else { Some(url) };
+            }
+            None => {
+                self.update_error = Some(
+                    "Не удалось проверить обновления. Проверьте подключение к интернету."
+                        .to_string(),
+                );
+            }
+        }
     }
 
     fn encrypt_screen(&mut self, ui: &mut Ui) {
@@ -4217,6 +4367,87 @@ fn file_display(path: &Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string()
+}
+
+const UPDATE_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/cherneyivan-cloud/prosto-podpis-updates/main/latest.json";
+
+/// Загружает манифест обновлений (curl, при отсутствии — PowerShell).
+fn fetch_update_manifest() -> Option<String> {
+    if let Ok(output) = std::process::Command::new("curl.exe")
+        .args(["-s", "-L", "--max-time", "10", UPDATE_MANIFEST_URL])
+        .output()
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+
+    let temp = std::env::temp_dir().join("prosto_podpis_update.json");
+    let script = format!(
+        "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri '{}' -TimeoutSec 10 -OutFile '{}'",
+        UPDATE_MANIFEST_URL,
+        temp.display()
+    );
+    let ok = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if ok {
+        let text = std::fs::read_to_string(&temp).ok();
+        let _ = std::fs::remove_file(&temp);
+        return text
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    }
+    None
+}
+
+fn json_string(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\"", key);
+    let start = json.find(&needle)? + needle.len();
+    let rest = &json[start..];
+    let colon = rest.find(':')? + 1;
+    let rest = rest[colon..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn version_is_newer(latest: &str, current: &str) -> bool {
+    let parse = |value: &str| -> Vec<u32> {
+        value
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| part.parse::<u32>().unwrap_or(0))
+            .collect()
+    };
+    let latest = parse(latest);
+    let current = parse(current);
+    for index in 0..latest.len().max(current.len()) {
+        let left = *latest.get(index).unwrap_or(&0);
+        let right = *current.get(index).unwrap_or(&0);
+        if left != right {
+            return left > right;
+        }
+    }
+    false
+}
+
+fn open_external(url: &str) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("explorer").arg(url).spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
 }
 
 /// Файл подписи по расширению.
