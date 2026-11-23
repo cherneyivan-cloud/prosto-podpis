@@ -8,6 +8,10 @@
   <img src="app/assets/app_icon.png" width="140" alt="Иконка приложения">
 </p>
 
+<p align="center">
+  <img src="docs/preview.png" alt="Интерфейс приложения">
+</p>
+
 ## Возможности
 
 - **Документы** — очередь файлов с поиском, сортировкой, Drag & Drop,
