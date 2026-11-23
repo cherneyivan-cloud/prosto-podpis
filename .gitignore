@@ -1,0 +1,15 @@
+# Артефакты сборки
+target/
+**/target/
+
+# Исполняемые файлы и отладочные данные
+*.exe
+*.pdb
+*.dSYM/
+build.log
+
+# Временные файлы
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
