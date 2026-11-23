@@ -14,7 +14,7 @@ use cryptoline_rust::error::Result;
 use cryptoline_rust::CryptolineError;
 
 #[derive(Parser)]
-#[command(name = "cryptoline")]
+#[command(name = "Podpis-cli")]
 #[command(about = "CryptoLine Rust — УКЭП подпись (ГОСТ Р 34.10-2012 + Streebog-256)", long_about = None)]
 struct Cli {
     #[command(subcommand)]

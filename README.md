@@ -43,7 +43,7 @@
 
 ```
 app/   — GUI на Rust + egui (Podpis.exe)
-cli/   — движок подписи/проверки (cryptoline.exe → cryptoline-cli.exe)
+cli/   — движок подписи/проверки (Podpis-cli.exe)
 ```
 
 ## Требования
@@ -60,7 +60,7 @@ cargo build --release
 
 cd ..\app
 cargo build --release
-copy ..\cli\target\release\cryptoline.exe ..\app\target\release\cryptoline-cli.exe
+copy ..\cli\target\release\Podpis-cli.exe ..\app\target\release\Podpis-cli.exe
 ```
 
 Запуск:
@@ -72,9 +72,9 @@ copy ..\cli\target\release\cryptoline.exe ..\app\target\release\cryptoline-cli.e
 CLI можно использовать отдельно:
 
 ```powershell
-cryptoline.exe sign --file Договор.pdf --cert certificate.der
-cryptoline.exe sign --file Договор.pdf --cert a.der --cert b.der --attached
-cryptoline.exe verify --file Договор.pdf --signature Договор_Черней_ИВ.sig
+Podpis-cli.exe sign --file Договор.pdf --cert certificate.der
+Podpis-cli.exe sign --file Договор.pdf --cert a.der --cert b.der --attached
+Podpis-cli.exe verify --file Договор.pdf --signature Договор_Черней_ИВ.sig
 ```
 
 ## Имя файла подписи

@@ -7,7 +7,7 @@
 ```
 target/release/
 ├── Podpis.exe           — GUI
-└── cryptoline-cli.exe   — CLI-движок подписи (лежит рядом с GUI)
+└── Podpis-cli.exe       — CLI-движок подписи (лежит рядом с GUI)
 ```
 
 ## Возможности
@@ -90,8 +90,8 @@ CLI-движок собирается отдельно и копируется �
 
 ```bash
 cargo build --release --manifest-path C:\opencode\taxcom\cryptoline-rust\Cargo.toml
-copy C:\opencode\taxcom\cryptoline-rust\target\release\cryptoline.exe ^
-     target\release\cryptoline-cli.exe
+copy C:\opencode\taxcom\cryptoline-rust\target\release\Podpis-cli.exe ^
+     target\release\Podpis-cli.exe
 ```
 
 ## Структура
@@ -102,9 +102,12 @@ src/
 ├── app.rs     — состояние, экраны, виджеты, вызовы CLI
 ├── theme.rs   — палитра, шрифты, тени, стили egui
 ├── icons.rs   — векторные иконки на Painter
+├── report.rs  — отчёты TXT и XLSX
 └── win.rs     — Win32: тёмный заголовок, HWND, ресайз без рамки (no-op вне Windows)
+build.rs       — встраивание иконки в Podpis.exe
 assets/
 ├── app_icon.png        — исходная иконка 512×512
+├── app_icon.ico        — многоразмерная иконка для exe
 ├── app_icon_256.png    — предпросмотр
 └── app_icon_256.rgba   — RGBA-данные для egui
 ```
@@ -115,7 +118,7 @@ assets/
 2. Загрузите сертификаты в разделе «Сертификаты» или через панель.
 3. Отметьте сертификаты и нажмите круглую кнопку с пером.
 
-GUI вызывает `cryptoline-cli.exe sign --file <док> --cert <сертификат>`,
+GUI вызывает `Podpis-cli.exe sign --file <док> --cert <сертификат>`,
 затем при необходимости переименовывает результат в `.p7s`, конвертирует
 Base64 → DER и упаковывает подписи в ZIP. Имя файла подписи формирует CLI:
 `<имя>_<Фамилия_ИО>.sig`, например `Документы_Черней_ИВ.sig` (фамилия

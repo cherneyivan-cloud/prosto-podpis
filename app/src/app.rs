@@ -1,7 +1,7 @@
-//! Интерфейс КриптоЛайн: тёмная матовая тема, три колонки и плавающая
+//! Интерфейс «Просто подпись»: тёмная матовая тема, три колонки и плавающая
 //! панель подписания.
 //!
-//! Логика подписи вынесена в CLI (`cryptoline-cli.exe`), который лежит рядом
+//! Логика подписи вынесена в CLI (`Podpis-cli.exe`), который лежит рядом
 //! с GUI: закрытый ключ остаётся в контейнере КриптоПро CSP.
 
 use eframe::egui::{
@@ -2388,8 +2388,8 @@ impl CryptoLineApp {
     fn cli_path(&self) -> PathBuf {
         std::env::current_exe()
             .ok()
-            .and_then(|e| e.parent().map(|d| d.join("cryptoline-cli.exe")))
-            .unwrap_or_else(|| PathBuf::from("cryptoline-cli.exe"))
+            .and_then(|e| e.parent().map(|d| d.join("Podpis-cli.exe")))
+            .unwrap_or_else(|| PathBuf::from("Podpis-cli.exe"))
     }
 
     /// Ctrl+A — выбрать все файлы в текущей выборке.

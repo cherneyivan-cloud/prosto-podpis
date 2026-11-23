@@ -36,5 +36,5 @@ clap = { version = "4.5", features = ["derive"] }
 hex = "0.4"
 
 [[bin]]
-name = "cryptoline"
+name = "Podpis-cli"
 path = "src/main.rs"
