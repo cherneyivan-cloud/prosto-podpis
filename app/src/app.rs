@@ -22,6 +22,10 @@ const LARGE_FILE_BYTES: u64 = 50 * 1024 * 1024;
 /// Строгая проверка подписей — не больше 80 МБ на файл.
 const VERIFY_MAX_BYTES: u64 = 80 * 1024 * 1024;
 
+/// Размер кнопок на полосе заголовка.
+const CAPTION_BUTTON_W: f32 = 46.0;
+const CAPTION_BUTTON_H: f32 = 34.0;
+
 // ---------------------------------------------------------------------------
 // Модель данных
 // ---------------------------------------------------------------------------
@@ -280,6 +284,7 @@ pub struct CryptoLineApp {
 
     panel_open: bool,
     panel_collapsed: bool,
+    sidebar_open: bool,
     detached: bool,
     separate_files: bool,
     pack_zip: bool,
@@ -344,6 +349,7 @@ impl Default for CryptoLineApp {
             sort: SortMode::Recent,
             panel_open: true,
             panel_collapsed: false,
+            sidebar_open: true,
             detached: true,
             separate_files: false,
             pack_zip: false,
@@ -425,32 +431,49 @@ impl eframe::App for CryptoLineApp {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
 
-        // Сайдбар — на всю высоту окна.
-        egui::SidePanel::left("sidebar")
-            .exact_width(212.0)
-            .resizable(false)
+        // Заголовок окна — отдельной узкой полосой, как в мессенджерах.
+        egui::TopBottomPanel::top("titlebar")
+            .exact_height(34.0)
             .frame(
                 egui::Frame::none()
-                    .fill(BG_WINDOW)
+                    .fill(BG_TITLEBAR)
                     .inner_margin(Margin {
-                        left: 0.0,
-                        right: 14.0,
-                        top: 18.0,
-                        bottom: 14.0,
+                        left: 10.0,
+                        right: 0.0,
+                        top: 0.0,
+                        bottom: 0.0,
                     }),
             )
-            .show(ctx, |ui| self.sidebar(ui));
+            .show(ctx, |ui| self.title_bar(ui));
+
+        // Сайдбар — на всю высоту под заголовком.
+        if self.sidebar_open {
+            egui::SidePanel::left("sidebar")
+                .exact_width(212.0)
+                .resizable(false)
+                .frame(
+                    egui::Frame::none()
+                        .fill(BG_WINDOW)
+                        .inner_margin(Margin {
+                            left: 0.0,
+                            right: 14.0,
+                            top: 14.0,
+                            bottom: 14.0,
+                        }),
+                )
+                .show(ctx, |ui| self.sidebar(ui));
+        }
 
         egui::TopBottomPanel::top("topbar")
-            .exact_height(72.0)
+            .exact_height(60.0)
             .frame(
                 egui::Frame::none()
                     .fill(BG_WINDOW)
                     .inner_margin(Margin {
-                        left: 24.0,
+                        left: 18.0,
                         right: 20.0,
-                        top: 14.0,
-                        bottom: 12.0,
+                        top: 12.0,
+                        bottom: 10.0,
                     }),
             )
             .show(ctx, |ui| self.topbar(ui));
@@ -545,7 +568,7 @@ impl CryptoLineApp {
             ui.add_space(8.0);
             ui.add_space(4.0);
             ui.label(
-                RichText::new("Просто подпись")
+                RichText::new("Просто Подпись")
                     .font(theme::medium(15.5))
                     .color(TEXT),
             );
@@ -643,36 +666,104 @@ impl CryptoLineApp {
     // Верхняя панель
     // -----------------------------------------------------------------------
 
-    fn topbar(&mut self, ui: &mut Ui) {
-        self.topbar_drag(ui);
+    /// Полоса заголовка: перетаскивание окна и кнопки управления.
+    fn title_bar(&mut self, ui: &mut Ui) {
+        let strip = ui.max_rect();
 
-        if self.active_nav != Nav::Docs {
-            ui.horizontal(|ui| {
+        // Тонкая линия-разделитель под полосой.
+        ui.painter().hline(
+            0.0..=ui.ctx().screen_rect().width(),
+            strip.bottom() - 0.5,
+            Stroke::new(1.0, DIVIDER_SOFT),
+        );
+
+        let controls_w = CAPTION_BUTTON_W * 3.0;
+        let drag_rect = Rect::from_min_max(
+            strip.min,
+            Pos2::new((strip.max.x - controls_w).max(strip.min.x), strip.max.y),
+        );
+        let drag = ui.interact(
+            drag_rect,
+            egui::Id::new("titlebar_drag"),
+            Sense::click_and_drag(),
+        );
+        if drag.double_clicked() {
+            let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+        } else if drag.drag_started() {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+
+        let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+
+            if caption_button(ui, Icon::Close, true)
+                .on_hover_text("Закрыть")
+                .clicked()
+            {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+
+            if caption_button(
+                ui,
+                if maximized {
+                    Icon::Restore
+                } else {
+                    Icon::Maximize
+                },
+                false,
+            )
+            .on_hover_text(if maximized { "Восстановить" } else { "Развернуть" })
+            .clicked()
+            {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+            }
+
+            if caption_button(ui, Icon::Minus, false)
+                .on_hover_text("Свернуть")
+                .clicked()
+            {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+        });
+    }
+
+    fn topbar(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            if menu_button(ui, self.sidebar_open)
+                .on_hover_text("Свернуть или показать меню")
+                .clicked()
+            {
+                self.sidebar_open = !self.sidebar_open;
+            }
+            ui.add_space(12.0);
+
+            if self.active_nav != Nav::Docs {
                 ui.label(
                     RichText::new(self.active_nav.title())
                         .font(theme::medium(16.0))
                         .color(TEXT_MUTED),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    self.window_controls(ui);
-                    ui.add_space(6.0);
                     self.token_profile(ui);
                 });
-            });
-            return;
-        }
+                return;
+            }
 
-        ui.horizontal(|ui| {
-            let search_w = (ui.available_width() - 374.0 - 24.0).max(160.0);
+            let search_w = (ui.available_width() - 374.0 - 24.0).clamp(160.0, 480.0);
             ui.allocate_ui_with_layout(
-                Vec2::new(search_w, 46.0),
+                Vec2::new(search_w, 38.0),
                 Layout::left_to_right(Align::Center),
                 |ui| self.search_box(ui),
             );
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                self.window_controls(ui);
-                ui.add_space(10.0);
                 self.token_profile(ui);
                 ui.add_space(10.0);
 
@@ -697,55 +788,6 @@ impl CryptoLineApp {
         });
     }
 
-    /// Перетаскивание окна без системного заголовка.
-    fn topbar_drag(&mut self, ui: &mut Ui) {
-        let drag = ui.interact(
-            ui.max_rect(),
-            egui::Id::new("topbar_drag"),
-            Sense::click_and_drag(),
-        );
-        if drag.double_clicked() {
-            let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-        } else if drag.drag_started() {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
-    }
-
-    fn window_controls(&mut self, ui: &mut Ui) {
-        let close = window_button(ui, Icon::Close, true);
-        if close.clicked() {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Close);
-        }
-
-        let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
-        let max = window_button(
-            ui,
-            if maximized {
-                Icon::Restore
-            } else {
-                Icon::Maximize
-            },
-            false,
-        )
-        .on_hover_text(if maximized { "Восстановить" } else { "Развернуть" });
-        if max.clicked() {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-        }
-
-        if window_button(ui, Icon::Minus, false)
-            .on_hover_text("Свернуть")
-            .clicked()
-        {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-        }
-    }
-
     fn search_box(&mut self, ui: &mut Ui) {
         egui::Frame::none()
             .fill(BG_SUNKEN)
@@ -753,11 +795,11 @@ impl CryptoLineApp {
             .inner_margin(Margin {
                 left: 14.0,
                 right: 12.0,
-                top: 9.0,
-                bottom: 9.0,
+                top: 10.0,
+                bottom: 10.0,
             })
             .show(ui, |ui| {
-                ui.set_width(ui.available_width().min(356.0) - 26.0);
+                ui.set_width(ui.available_width() - 26.0);
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                     icons::paint(ui.painter(), r, Icon::Search, TEXT_MUTED, 1.5);
@@ -767,7 +809,7 @@ impl CryptoLineApp {
                             .id(egui::Id::new("file_search"))
                             .frame(false)
                             .hint_text(
-                                RichText::new("Поиск по документам...")
+                                RichText::new("Поиск")
                                     .font(theme::regular(13.5))
                                     .color(TEXT_DIM),
                             )
@@ -781,26 +823,26 @@ impl CryptoLineApp {
 
     fn token_profile(&mut self, ui: &mut Ui) {
         ui.allocate_ui_with_layout(
-            Vec2::new(204.0, 46.0),
+            Vec2::new(204.0, 38.0),
             Layout::left_to_right(Align::Center),
             |ui| {
-                let (r, _) = ui.allocate_exact_size(Vec2::splat(38.0), Sense::hover());
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::hover());
                 let p = ui.painter();
                 p.rect_filled(r, Rounding::same(10.0), ACCENT_SOFT);
-                icons::paint(p, r.shrink(10.0), Icon::Cert, ACCENT, 1.7);
+                icons::paint(p, r.shrink(9.0), Icon::Cert, ACCENT, 1.7);
                 p.circle_filled(
                     Pos2::new(r.right() - 4.0, r.bottom() - 4.0),
-                    5.5,
+                    5.0,
                     BG_WINDOW,
                 );
                 p.circle_filled(
                     Pos2::new(r.right() - 4.0, r.bottom() - 4.0),
-                    3.5,
+                    3.2,
                     GREEN,
                 );
                 ui.add_space(4.0);
                 ui.vertical(|ui| {
-                    ui.add_space(4.0);
+                    ui.add_space(1.0);
                     ui.label(
                         RichText::new("КриптоПро CSP")
                             .font(theme::medium(13.0))
@@ -2170,7 +2212,7 @@ impl CryptoLineApp {
                 setting_row(
                     ui,
                     "Версия",
-                    &format!("Просто подпись {} · egui", env!("CARGO_PKG_VERSION")),
+                    &format!("Просто Подпись {} · egui", env!("CARGO_PKG_VERSION")),
                     true,
                 );
                 ui.add_space(10.0);
@@ -2856,14 +2898,19 @@ impl CryptoLineApp {
         self.active_nav = Nav::Certs;
     }
 
+    /// Достаёт CN из DN вида `CN=..., O=..., C=...`.
+    ///
+    /// Windows (CryptoAPI, .NET) отдаёт значения в кавычках, а кавычки внутри
+    /// значения удваивает: `CN="ООО ""ТЕНЗОР"""`. Поэтому снимаем обрамление
+    /// и превращаем `""` обратно в `"`.
     fn extract_cn_from_dn(&self, dn: &str) -> String {
-        for part in dn.split(',') {
+        for part in split_dn(dn) {
             let part = part.trim();
             if let Some(rest) = part.strip_prefix("CN=") {
-                return rest.trim().trim_matches('"').to_string();
+                return unquote_dn_value(rest);
             }
         }
-        dn.to_string()
+        unquote_dn_value(dn)
     }
 
     /// Форматирует ФИО («ИВАН ПЕТРОВ» → «Иван Петров»), но не трогает
@@ -3558,6 +3605,47 @@ impl CryptoLineApp {
 }
 
 // ---------------------------------------------------------------------------
+// Разбор DN
+// ---------------------------------------------------------------------------
+
+/// Делит DN по запятым, не трогая запятые внутри кавычек и после `\`.
+fn split_dn(dn: &str) -> Vec<&str> {
+    let bytes = dn.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut quoted = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                i += 2;
+                continue;
+            }
+            b'"' => quoted = !quoted,
+            b',' if !quoted => {
+                parts.push(&dn[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&dn[start..]);
+    parts
+}
+
+/// Снимает обрамляющие кавычки и раскрывает удвоенные (`""` → `"`).
+fn unquote_dn_value(raw: &str) -> String {
+    let value = raw.trim();
+    let inner = if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    inner.replace("\"\"", "\"").trim().to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Мелкие виджеты
 // ---------------------------------------------------------------------------
 
@@ -3778,15 +3866,18 @@ fn folder_button(ui: &mut Ui) -> Response {
     resp
 }
 
-fn window_button(ui: &mut Ui, icon: Icon, danger: bool) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
+/// Кнопка на полосе заголовка — как в мессенджерах: без скругления,
+/// прямоугольная зона 46×34, у «закрыть» красная подсветка.
+fn caption_button(ui: &mut Ui, icon: Icon, danger: bool) -> Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(CAPTION_BUTTON_W, CAPTION_BUTTON_H), Sense::click());
     let p = ui.painter();
     if resp.hovered() {
         p.rect_filled(
             rect,
-            Rounding::same(7.0),
+            Rounding::ZERO,
             if danger {
-                Color32::from_rgb(0xD9, 0x4A, 0x4A)
+                Color32::from_rgb(0xE0, 0x45, 0x45)
             } else {
                 BG_CARD_HOVER
             },
@@ -3794,10 +3885,10 @@ fn window_button(ui: &mut Ui, icon: Icon, danger: bool) -> Response {
     }
     icons::paint(
         p,
-        Rect::from_center_size(rect.center(), Vec2::splat(12.0)),
+        Rect::from_center_size(rect.center(), Vec2::splat(10.0)),
         icon,
-        if resp.hovered() { TEXT } else { TEXT_MUTED },
-        1.3,
+        if resp.hovered() { TEXT } else { TEXT_SOFT },
+        1.2,
     );
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -3805,7 +3896,25 @@ fn window_button(ui: &mut Ui, icon: Icon, danger: bool) -> Response {
     resp
 }
 
-fn danger_button(ui: &mut Ui, label: &str, width: f32) -> Response {
+/// Кнопка меню: сворачивает и разворачивает боковую панель.
+fn menu_button(ui: &mut Ui, active: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect, Rounding::same(9.0), BG_CARD_HOVER);
+    }
+    icons::paint(
+        p,
+        Rect::from_center_size(rect.center(), Vec2::splat(17.0)),
+        Icon::Menu,
+        if resp.hovered() || active { TEXT } else { TEXT_MUTED },
+        1.7,
+    );
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}fn danger_button(ui: &mut Ui, label: &str, width: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 38.0), Sense::click());
     let p = ui.painter();
     p.rect_filled(

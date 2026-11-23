@@ -11,6 +11,7 @@ use std::sync::Arc;
 // --- Поверхности ---------------------------------------------------------
 
 pub const BG_WINDOW: Color32 = Color32::from_rgb(0x23, 0x25, 0x30);
+pub const BG_TITLEBAR: Color32 = Color32::from_rgb(0x2A, 0x2C, 0x39);
 pub const BG_WORKSPACE: Color32 = Color32::from_rgb(0x2B, 0x2D, 0x3A);
 pub const BG_CARD: Color32 = Color32::from_rgb(0x35, 0x38, 0x49);
 pub const BG_CARD_HOVER: Color32 = Color32::from_rgb(0x3B, 0x3E, 0x51);

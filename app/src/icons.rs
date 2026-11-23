@@ -29,6 +29,7 @@ pub enum Icon {
     Folder,
     Maximize,
     Restore,
+    Menu,
 }
 
 pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32, width: f32) {
@@ -238,6 +239,11 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32, wi
                 vec![p(0.14, 0.32), p(0.14, 0.86), p(0.68, 0.86)],
                 stroke,
             ));
+        }
+        Icon::Menu => {
+            for t in [0.30, 0.50, 0.70] {
+                painter.line_segment([p(0.16, t), p(0.84, t)], stroke);
+            }
         }
     }
 }
