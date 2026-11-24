@@ -12,6 +12,21 @@
   <img src="docs/preview.png" alt="Интерфейс приложения">
 </p>
 
+## Установка
+
+Готовый установщик — в разделе [Releases](https://github.com/cherneyivan-cloud/prosto-podpis/releases/latest):
+
+```
+ProstoPodpis-Setup.exe
+```
+
+- ставится **без прав администратора** — в `%LOCALAPPDATA%\Programs\Просто Подпись`;
+- создаёт ярлык на рабочем столе и в меню «Пуск»;
+- добавляет запись «Просто Подпись» в «Приложения и возможности»;
+- удаление — через «Приложения и возможности» или `uninstall.exe --uninstall`.
+
+Тихая установка: `ProstoPodpis-Setup.exe --silent`.
+
 ## Возможности
 
 - **Документы** — очередь файлов с поиском, сортировкой, Drag & Drop,

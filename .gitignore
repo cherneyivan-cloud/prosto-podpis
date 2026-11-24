@@ -13,3 +13,6 @@ build.log
 *.log
 .DS_Store
 Thumbs.db
+
+# Промежуточные файлы установщика
+installer/payload/
