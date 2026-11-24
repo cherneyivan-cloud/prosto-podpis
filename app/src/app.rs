@@ -705,8 +705,16 @@ impl CryptoLineApp {
             // Логотип — вертикальный лист: высота фиксирована, ширина по пропорции.
             let logo_h = 36.0;
             let logo_w = logo_h * crate::LOGO_W as f32 / crate::LOGO_H as f32;
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(logo_w + 2.0, 44.0), Sense::hover());
-            let logo_rect = Rect::from_center_size(rect.center(), Vec2::new(logo_w, logo_h));
+            let (rect, logo_resp) =
+                ui.allocate_exact_size(Vec2::new(logo_w + 2.0, 44.0), Sense::hover());
+            let hover = ui
+                .ctx()
+                .animate_bool_with_time(egui::Id::new("logo_hover"), logo_resp.hovered(), 0.2);
+            let scale = 1.0 + 0.04 * hover;
+            let logo_rect = Rect::from_center_size(
+                rect.center(),
+                Vec2::new(logo_w * scale, logo_h * scale),
+            );
             ui.painter().image(
                 texture.id(),
                 logo_rect,
@@ -723,25 +731,59 @@ impl CryptoLineApp {
 
         ui.add_space(26.0);
 
-        for nav in [
+        let navs = [
             Nav::Docs,
             Nav::Encrypt,
             Nav::Verify,
             Nav::Certs,
             Nav::Zip,
             Nav::Settings,
-        ] {
-            self.nav_item(ui, nav);
+        ];
+        let nav_left = ui.min_rect().left();
+        let row_height = 40.0 + ui.spacing().item_spacing.y;
+        let start_y = ui.cursor().min.y + 20.0;
+        let active_index = navs.iter().position(|n| *n == self.active_nav).unwrap_or(0);
+        let target_y = start_y + active_index as f32 * row_height;
+        let indicator_y = ui.ctx().animate_value_with_time(
+            egui::Id::new("nav_indicator"),
+            target_y,
+            0.24,
+        );
+
+        for (index, nav) in navs.into_iter().enumerate() {
+            self.nav_item(ui, nav, index);
         }
+
+        // Белый индикатор активного раздела плавно переезжает между пунктами.
+        let p = ui.painter();
+        p.rect_filled(
+            Rect::from_center_size(
+                Pos2::new(nav_left + 2.5, indicator_y),
+                Vec2::new(3.0, 18.0),
+            ),
+            Rounding::same(2.0),
+            Color32::WHITE,
+        );
+        p.rect_filled(
+            Rect::from_center_size(
+                Pos2::new(nav_left + 14.5, indicator_y),
+                Vec2::new(8.0, 2.5),
+            ),
+            Rounding::same(1.5),
+            Color32::WHITE,
+        );
 
         ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 ui.add_space(20.0);
                 ui.label(
-                    RichText::new("v1.0 · ГОСТ Р 34.10-2012")
-                        .font(theme::regular(10.5))
-                        .color(TEXT_DIM),
+                    RichText::new(format!(
+                        "v{} · ГОСТ Р 34.10-2012",
+                        env!("CARGO_PKG_VERSION")
+                    ))
+                    .font(theme::regular(10.5))
+                    .color(TEXT_DIM),
                 );
             });
             ui.add_space(10.0);
@@ -759,23 +801,22 @@ impl CryptoLineApp {
         });
     }
 
-    fn nav_item(&mut self, ui: &mut Ui, nav: Nav) {
+    fn nav_item(&mut self, ui: &mut Ui, nav: Nav, index: usize) {
         let active = self.active_nav == nav;
         let (rect, resp) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::click());
 
+        // Плавные переходы цвета текста, иконки и подсветки строки.
+        let t = ui
+            .ctx()
+            .animate_bool_with_time(egui::Id::new(("nav_anim", index)), active, 0.2);
+        let hover_t = ui
+            .ctx()
+            .animate_bool_with_time(egui::Id::new(("nav_hover", index)), resp.hovered() && !active, 0.15);
+
         let p = ui.painter();
-        if active {
-            p.rect_filled(
-                Rect::from_min_size(
-                    Pos2::new(rect.left() + 1.0, rect.center().y - 9.0),
-                    Vec2::new(3.0, 18.0),
-                ),
-                Rounding::same(2.0),
-                Color32::WHITE,
-            );
-        } else if resp.hovered() {
-            p.rect_filled(rect, Rounding::same(9.0), BG_ACTIVE_ROW);
+        if hover_t > 0.01 {
+            p.rect_filled(rect, Rounding::same(9.0), fade_col(BG_ACTIVE_ROW, hover_t));
         }
 
         let icon_rect = Rect::from_center_size(
@@ -786,7 +827,7 @@ impl CryptoLineApp {
             p,
             icon_rect,
             nav.icon(),
-            if active { ACCENT } else { TEXT_MUTED },
+            lerp_color(TEXT_MUTED, ACCENT, t),
             1.6,
         );
         p.text(
@@ -798,7 +839,7 @@ impl CryptoLineApp {
             } else {
                 theme::regular(14.0)
             },
-            if active { TEXT } else { TEXT_MUTED },
+            lerp_color(TEXT_MUTED, TEXT, t),
         );
 
         if resp.hovered() {
@@ -1151,19 +1192,29 @@ impl CryptoLineApp {
         let active = self.active_file == Some(idx);
         let hovered = resp.hovered();
         let selected = self.selected_files.contains(&idx);
+
+        // Плавный подъём выбранной карточки: фон, смещение и тень.
+        let lift = ui
+            .ctx()
+            .animate_bool_with_time(egui::Id::new(("card_lift", idx)), active, 0.2);
+        let hover_t = ui
+            .ctx()
+            .animate_bool_with_time(egui::Id::new(("card_hover", idx)), hovered && !active, 0.15);
+        let offset = -1.6 * lift;
         let card = Rect::from_min_max(
-            rect.min + Vec2::new(0.0, 2.0),
-            rect.max - Vec2::new(0.0, 2.0),
+            rect.min + Vec2::new(0.0, 2.0 + offset),
+            rect.max - Vec2::new(0.0, 2.0 - offset),
         );
 
         let p = ui.painter();
-        if active {
-            p.add(egui::Shape::Mesh(
-                theme::card_shadow().tessellate(card, Rounding::same(14.0)),
-            ));
-            p.rect_filled(card, Rounding::same(14.0), BG_CARD);
-        } else if hovered {
-            p.rect_filled(card, Rounding::same(14.0), BG_ROW_HOVER);
+        let fill_t = lift.max(hover_t);
+        if fill_t > 0.01 {
+            let base = if lift > 0.01 { BG_CARD } else { BG_ROW_HOVER };
+            p.rect_filled(card, Rounding::same(14.0), fade_col(base, fill_t));
+        }
+        if lift > 0.02 {
+            let shadow = theme::card_shadow().tessellate(card, Rounding::same(14.0));
+            p.add(egui::Shape::Mesh(shadow));
         }
         if selected && !active {
             p.rect_stroke(
@@ -1273,11 +1324,27 @@ impl CryptoLineApp {
         // SidePanel в egui считает exact_width шириной контента и добавляет
         // внешние отступы наружу, поэтому фиксируем ширину инспектора явно.
         let height = ui.available_height();
+
+        // При выборе другого документа содержимое мягко «подъезжает» на 4 px.
+        let key = self.active_file.map(|v| v as f32 + 1.0).unwrap_or(0.0);
+        let anim = ui
+            .ctx()
+            .animate_value_with_time(egui::Id::new("inspector_switch"), key, 0.24);
+        let progress = if key > 0.0 {
+            (anim - key + 1.0).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let shift = (1.0 - progress) * 4.0;
+
         ui.allocate_ui_with_layout(
             Vec2::new(334.0, height),
             Layout::top_down(Align::Min),
             |ui| {
                 ui.set_width(334.0);
+                if shift > 0.05 {
+                    ui.add_space(shift);
+                }
                 self.inspector_body(ui);
             },
         );
@@ -1480,15 +1547,22 @@ impl CryptoLineApp {
     // -----------------------------------------------------------------------
 
     fn floating_panel(&mut self, ctx: &egui::Context) {
-        if !self.panel_open {
+        // Панель плавно выезжает снизу; при закрытии уезжает обратно.
+        let slide = ctx.animate_bool_with_time(
+            egui::Id::new("sign_panel_slide"),
+            self.panel_open,
+            0.26,
+        );
+        if !self.panel_open && slide <= 0.001 {
             return;
         }
 
+        let offset_y = (1.0 - slide) * 26.0;
         let anchor = Align2::RIGHT_BOTTOM;
         egui::Area::new(egui::Id::new("sign_panel"))
             .order(egui::Order::Foreground)
             .pivot(anchor)
-            .fixed_pos(ctx.screen_rect().right_bottom() - Vec2::new(22.0, 22.0))
+            .fixed_pos(ctx.screen_rect().right_bottom() - Vec2::new(22.0, 22.0 - offset_y))
             .constrain_to(ctx.screen_rect())
             .show(ctx, |ui| {
                 egui::Frame::none()
@@ -4019,6 +4093,18 @@ fn fade_col(c: Color32, f: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * f.clamp(0.0, 1.0)) as u8)
 }
 
+/// Линейная интерполяция цвета (t = 0..1).
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
+    Color32::from_rgba_unmultiplied(
+        mix(a.r(), b.r()),
+        mix(a.g(), b.g()),
+        mix(a.b(), b.b()),
+        mix(a.a(), b.a()),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Мелкие виджеты
 // ---------------------------------------------------------------------------
@@ -4115,15 +4201,19 @@ fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {    let (rect, r
 fn round_add_button(ui: &mut Ui, diameter: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(diameter), Sense::click());
     let p = ui.painter();
-    paint_round_shadow(p, rect.center(), diameter / 2.0);
+    let hover = ui
+        .ctx()
+        .animate_bool_with_time(ui.id().with("add_hover"), resp.hovered(), 0.12);
+    let d = diameter * (1.0 + 0.05 * hover);
+    paint_round_shadow(p, rect.center(), d / 2.0);
     p.circle_filled(
         rect.center(),
-        diameter / 2.0,
-        if resp.hovered() { ACCENT_HOVER } else { ACCENT },
+        d / 2.0,
+        lerp_color(ACCENT, ACCENT_HOVER, hover),
     );
     icons::paint(
         p,
-        Rect::from_center_size(rect.center(), Vec2::splat(diameter * 0.44)),
+        Rect::from_center_size(rect.center(), Vec2::splat(d * 0.44)),
         Icon::Plus,
         Color32::WHITE,
         2.0,
@@ -4137,19 +4227,43 @@ fn round_add_button(ui: &mut Ui, diameter: f32) -> Response {
 fn action_button(ui: &mut Ui, icon: Icon) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(58.0), Sense::click());
     let p = ui.painter();
-    paint_round_shadow(p, rect.center(), 29.0);
+
+    // Наведение — мягкое увеличение, нажатие — тактильное сжатие.
+    let hover = ui
+        .ctx()
+        .animate_bool_with_time(ui.id().with("sign_hover"), resp.hovered(), 0.12);
+    let pressed = resp.is_pointer_button_down_on();
+    let scale = if pressed { 0.95 } else { 1.0 + 0.05 * hover };
+    let radius = 29.0 * scale;
+
+    paint_round_shadow(p, rect.center(), radius);
     p.circle_filled(
         rect.center(),
-        29.0,
-        if resp.hovered() { ACCENT_HOVER } else { ACCENT },
+        radius,
+        lerp_color(ACCENT, ACCENT_HOVER, hover),
     );
     icons::paint(
         p,
-        Rect::from_center_size(rect.center(), Vec2::splat(24.0)),
+        Rect::from_center_size(rect.center(), Vec2::splat(24.0 * scale)),
         icon,
         Color32::WHITE,
         2.0,
     );
+
+    // Мягкая пульсация готовности к подписанию.
+    let time = ui.input(|i| i.time) as f32;
+    let pulse = (time * 2.2).sin() * 0.5 + 0.5;
+    p.circle_stroke(
+        rect.center(),
+        radius + 2.0 + pulse * 5.0,
+        Stroke::new(
+            1.4,
+            Color32::from_rgba_unmultiplied(0x4B, 0x6B, 0xFB, (46.0 * (1.0 - pulse)) as u8),
+        ),
+    );
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(50));
+
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -4564,27 +4678,23 @@ fn toggle_row(ui: &mut Ui, value: &mut bool, label: &str) -> Response {
         Pos2::new(rect.left(), rect.center().y - 10.0),
         Vec2::new(36.0, 20.0),
     );
+    // Плавное скольжение бегунка и перелив цвета трека.
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(egui::Id::new(("toggle", label)), *value, 0.2);
     p.rect_filled(
         track,
         Rounding::same(10.0),
-        if *value {
-            ACCENT
-        } else {
-            Color32::from_rgb(0x4A, 0x4E, 0x5F)
-        },
+        lerp_color(Color32::from_rgb(0x4A, 0x4E, 0x5F), ACCENT, t),
     );
-    let knob_x = if *value {
-        track.right() - 10.0
-    } else {
-        track.left() + 10.0
-    };
+    let knob_x = track.left() + 10.0 + (track.width() - 20.0) * t;
     p.circle_filled(Pos2::new(knob_x, track.center().y), 7.0, Color32::WHITE);
     p.text(
         Pos2::new(track.right() + 12.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
         theme::regular(13.5),
-        if resp.hovered() { TEXT } else { TEXT_SOFT },
+        lerp_color(TEXT_SOFT, TEXT, if resp.hovered() { 1.0 } else { t * 0.4 }),
     );
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -4905,8 +5015,14 @@ const UPDATE_MANIFEST_URL: &str =
 
 /// Загружает манифест обновлений (curl, при отсутствии — PowerShell).
 fn fetch_update_manifest() -> Option<String> {
+    // ?t= — чтобы CDN GitHub не отдавал закэшированный манифест.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let url = format!("{}?t={}", UPDATE_MANIFEST_URL, stamp);
     if let Ok(output) = std::process::Command::new("curl.exe")
-        .args(["-s", "-L", "--max-time", "10", UPDATE_MANIFEST_URL])
+        .args(["-s", "-L", "--max-time", "10", &url])
         .output()
     {
         if output.status.success() {
@@ -4920,7 +5036,7 @@ fn fetch_update_manifest() -> Option<String> {
     let temp = std::env::temp_dir().join("prosto_podpis_update.json");
     let script = format!(
         "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri '{}' -TimeoutSec 10 -OutFile '{}'",
-        UPDATE_MANIFEST_URL,
+        url,
         temp.display()
     );
     let ok = std::process::Command::new("powershell")
