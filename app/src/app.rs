@@ -296,6 +296,8 @@ pub struct CryptoLineApp {
 
     hash_pending: Option<usize>,
     hash_rx: Option<mpsc::Receiver<(usize, String)>>,
+    sign_rx: Option<mpsc::Receiver<SignOutcome>>,
+    signing: Option<SignState>,
 
     verify_docs: Vec<PathBuf>,
     verify_sigs: Vec<PathBuf>,
@@ -327,10 +329,28 @@ struct VerifyItem {
 }
 
 /// Сертификат, подготовленный к вызову CLI (путь к DER + владелец).
+#[derive(Clone)]
 struct PreparedCert {
     path: PathBuf,
     subject: String,
     imported: bool,
+}
+
+/// Результат подписания одного документа из фонового потока.
+struct SignOutcome {
+    idx: usize,
+    created: Vec<(String, PathBuf)>,
+    errors: Vec<String>,
+}
+
+/// Состояние идущего подписания — для анимации и прогресса.
+struct SignState {
+    total: usize,
+    done: usize,
+    started: f64,
+    dirs: Vec<PathBuf>,
+    errors: usize,
+    temp_certs: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -363,6 +383,8 @@ impl Default for CryptoLineApp {
             encoding: SigEncoding::Base64,
             hash_pending: None,
             hash_rx: None,
+            sign_rx: None,
+            signing: None,
             verify_docs: Vec::new(),
             verify_sigs: Vec::new(),
             verify_items: Vec::new(),
@@ -434,6 +456,7 @@ impl eframe::App for CryptoLineApp {
             self.titlebar_applied = crate::win::enable_dark_titlebar();
         }
         self.poll_hash();
+        self.poll_signing(ctx);
         self.handle_dropped(ctx);
 
         // Заставка: пока она видна, остальной интерфейс не рисуем и не опрашиваем.
@@ -542,6 +565,7 @@ impl eframe::App for CryptoLineApp {
         if self.active_nav == Nav::Docs {
             self.floating_panel(ctx);
         }
+        self.signing_overlay(ctx);
         self.confirm_delete_dialog(ctx);
         self.large_sign_dialog(ctx);
         self.drop_overlay(ctx);
@@ -1049,6 +1073,104 @@ impl CryptoLineApp {
     // -----------------------------------------------------------------------
     // Центральная колонка: очередь документов
     // -----------------------------------------------------------------------
+
+    /// Анимация идущего подписания поверх всего окна.
+    fn signing_overlay(&mut self, ctx: &egui::Context) {
+        let Some(state) = &self.signing else {
+            return;
+        };
+        let done = state.done;
+        let total = state.total.max(1);
+        let started = state.started as f32;
+
+        let area = ctx.screen_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("signing_modal"),
+        ));
+        let p = &painter;
+        p.rect_filled(area, 0.0, Color32::from_black_alpha(96));
+
+        let card = Rect::from_center_size(area.center(), Vec2::new(372.0, 148.0));
+        p.add(egui::Shape::Mesh(
+            theme::floating_shadow().tessellate(card, Rounding::same(18.0)),
+        ));
+        p.rect_filled(card, Rounding::same(18.0), BG_PANEL);
+
+        // Мини-лист с прорисовывающимся росчерком.
+        let page = Rect::from_min_size(
+            card.min + Vec2::new(26.0, 36.0),
+            Vec2::new(48.0, 70.0),
+        );
+        p.rect_filled(page, Rounding::same(9.0), BG_WINDOW);
+        p.rect_stroke(page, Rounding::same(9.0), Stroke::new(2.4, ACCENT));
+
+        let now = ctx.input(|i| i.time) as f32;
+        let phase = if started > 0.0 {
+            (((now - started) / 1.6) % 1.0).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if let Some(tex) = &self.sig_tex {
+            let sig_rect = Rect::from_min_max(
+                Pos2::new(page.left() + page.width() * 0.02, page.top() + page.height() * 0.28),
+                Pos2::new(page.left() + page.width() * 1.30, page.top() + page.height() * 0.74),
+            );
+            let steps = 28;
+            for i in 0..steps {
+                let f0 = i as f32 / steps as f32;
+                let f1 = (i + 1) as f32 / steps as f32;
+                let a = ((phase * 1.25 - f0) / 0.18).clamp(0.0, 1.0);
+                if a <= 0.01 {
+                    continue;
+                }
+                let x0 = sig_rect.left() + sig_rect.width() * f0;
+                let x1 = sig_rect.left() + sig_rect.width() * f1;
+                p.image(
+                    tex.id(),
+                    Rect::from_min_max(
+                        Pos2::new(x0, sig_rect.top()),
+                        Pos2::new(x1, sig_rect.bottom()),
+                    ),
+                    Rect::from_min_max(Pos2::new(f0, 0.0), Pos2::new(f1, 1.0)),
+                    Color32::from_white_alpha((a * 255.0) as u8),
+                );
+            }
+        }
+
+        let text_x = page.right() + 22.0;
+        p.text(
+            Pos2::new(text_x, card.top() + 44.0),
+            Align2::LEFT_CENTER,
+            "Подписание документа",
+            theme::medium(16.0),
+            TEXT,
+        );
+        p.text(
+            Pos2::new(text_x, card.top() + 66.0),
+            Align2::LEFT_CENTER,
+            format!("{} из {}", done.min(total), total),
+            theme::regular(12.5),
+            TEXT_MUTED,
+        );
+
+        // Полоса прогресса.
+        let bar = Rect::from_min_size(
+            Pos2::new(text_x, card.bottom() - 48.0),
+            Vec2::new(card.right() - text_x - 26.0, 8.0),
+        );
+        p.rect_filled(bar, Rounding::same(4.0), Color32::from_rgb(0x1E, 0x21, 0x2C));
+        let progress = (done as f32 / total as f32).clamp(0.0, 1.0);
+        if progress > 0.0 {
+            p.rect_filled(
+                Rect::from_min_size(bar.min, Vec2::new(bar.width() * progress, bar.height())),
+                Rounding::same(4.0),
+                ACCENT,
+            );
+        }
+
+        ctx.request_repaint_after(Duration::from_millis(33));
+    }
 
     fn docs_screen(&mut self, ui: &mut Ui) {
         ui.add_space(6.0);
@@ -1700,7 +1822,9 @@ impl CryptoLineApp {
                 encoding_combo(ui, &mut self.encoding, 116.0);
             });
             ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
-                if action_button(ui, Icon::Pen).clicked() {
+                if self.signing.is_some() {
+                    sign_spinner(ui);
+                } else if action_button(ui, Icon::Pen).clicked() {
                     self.sign_selected();
                 }
             });
@@ -3475,6 +3599,10 @@ impl CryptoLineApp {
     }
 
     fn sign_selected_now(&mut self) {
+        if self.signing.is_some() {
+            self.message = "Подписание уже выполняется".to_string();
+            return;
+        }
         let mut file_indices = self.selected_files.clone();
         if file_indices.is_empty() {
             if let Some(a) = self.active_file {
@@ -3502,10 +3630,7 @@ impl CryptoLineApp {
         }
 
         let cert_indices = self.selected_certs.clone();
-        let mut signed_files = 0usize;
-        let mut signed_sigs = 0usize;
         let mut errors: Vec<String> = Vec::new();
-        let mut signed_dirs: Vec<PathBuf> = Vec::new();
 
         // Сертификаты готовим один раз на весь пакет документов.
         let mut prepared: Vec<PreparedCert> = Vec::new();
@@ -3536,130 +3661,214 @@ impl CryptoLineApp {
         let format = self.format;
         let encoding = self.encoding;
 
-        for file_idx in file_indices {
-            let Some(file) = self.files.get(file_idx).cloned() else {
-                continue;
-            };
-            let mut created: Vec<(String, PathBuf)> = Vec::new();
+        // Документы к подписанию: (индекс в списке, путь).
+        let jobs: Vec<(usize, PathBuf)> = file_indices
+            .iter()
+            .filter_map(|idx| self.files.get(*idx).map(|f| (*idx, f.path.clone())))
+            .collect();
+        if jobs.is_empty() {
+            self.message = "Нет документов для подписания".to_string();
+            return;
+        }
 
-            if separate {
-                // По файлу подписи на каждый сертификат.
-                for cert in &prepared {
+        let temp_certs: Vec<PathBuf> = prepared
+            .iter()
+            .filter(|c| !c.imported)
+            .map(|c| c.path.clone())
+            .collect();
+
+        // Подпись идёт в фоновом потоке, чтобы интерфейс продолжал анимироваться.
+        let (tx, rx) = mpsc::channel::<SignOutcome>();
+        let prepared_thread = prepared.clone();
+        let cli_thread = cli.clone();
+        std::thread::spawn(move || {
+            for (idx, path) in jobs {
+                let mut created: Vec<(String, PathBuf)> = Vec::new();
+                let mut errors: Vec<String> = Vec::new();
+
+                if separate {
+                    for cert in &prepared_thread {
+                        match run_sign_cli(
+                            &cli_thread,
+                            &path,
+                            &[cert.path.clone()],
+                            detached,
+                            format,
+                            encoding,
+                        ) {
+                            Ok(sig) => created.push((cert.subject.clone(), sig)),
+                            Err(e) => errors.push(e),
+                        }
+                    }
+                } else {
+                    let cert_paths: Vec<PathBuf> =
+                        prepared_thread.iter().map(|c| c.path.clone()).collect();
                     match run_sign_cli(
-                        &cli,
-                        &file.path,
-                        &[cert.path.clone()],
+                        &cli_thread,
+                        &path,
+                        &cert_paths,
                         detached,
                         format,
                         encoding,
                     ) {
-                        Ok(path) => created.push((cert.subject.clone(), path)),
+                        Ok(sig) => {
+                            for cert in &prepared_thread {
+                                created.push((cert.subject.clone(), sig.clone()));
+                            }
+                        }
                         Err(e) => errors.push(e),
                     }
                 }
-            } else {
-                // Одна общая подпись со всеми подписантами.
-                let cert_paths: Vec<PathBuf> =
-                    prepared.iter().map(|c| c.path.clone()).collect();
-                match run_sign_cli(
-                    &cli,
-                    &file.path,
-                    &cert_paths,
-                    detached,
-                    format,
-                    encoding,
-                ) {
-                    Ok(path) => {
-                        for cert in &prepared {
-                            created.push((cert.subject.clone(), path.clone()));
-                        }
-                    }
-                    Err(e) => errors.push(e),
-                }
+
+                let _ = tx.send(SignOutcome {
+                    idx,
+                    created,
+                    errors,
+                });
             }
+        });
 
-            if !created.is_empty() {
-                let signed_at = chrono::Local::now()
-                    .format("%d.%m.%Y %H:%M")
-                    .to_string();
-                if let Some(f) = self.files.get_mut(file_idx) {
-                    for (subject, path) in &created {
-                        f.signatures.push(SignatureInfo {
-                            subject: subject.clone(),
-                            path: Some(path.clone()),
-                            signed_at: signed_at.clone(),
-                        });
-                    }
-                    f.status = FileStatus::Signed;
-                }
-                signed_files += 1;
-                signed_sigs += created.len();
+        self.sign_rx = Some(rx);
+        self.signing = Some(SignState {
+            total: file_indices.len(),
+            done: 0,
+            started: 0.0,
+            dirs: Vec::new(),
+            errors: errors.len(),
+            temp_certs,
+        });
+        self.message = format!("Подписание документов: 0 из {}", file_indices.len());
+    }
 
-                if let Some(dir) = file.path.parent() {
-                    if !signed_dirs.iter().any(|d| d == dir) {
-                        signed_dirs.push(dir.to_path_buf());
-                    }
-                }
-
-                if self.pack_zip {
-                    // При общей подписи путь один и тот же — не дублируем в ZIP.
-                    let mut unique: Vec<(String, PathBuf)> = Vec::new();
-                    for (subject, path) in &created {
-                        if !unique.iter().any(|(_, p)| p == path) {
-                            unique.push((subject.clone(), path.clone()));
-                        }
-                    }
-                    let zip_path = file.zip_path();
-                    match write_zip(&zip_path, &unique) {
-                        Ok(()) => {
-                            self.message = format!("Подписи упакованы: {}", zip_path.display())
-                        }
-                        Err(e) => errors.push(format!("ZIP: {}", e)),
+    /// Забирает результаты фонового подписания и завершает операцию.
+    fn poll_signing(&mut self, ctx: &egui::Context) {
+        if self.sign_rx.is_none() {
+            return;
+        }
+        let mut finished = false;
+        let mut outcomes: Vec<SignOutcome> = Vec::new();
+        if let Some(rx) = &self.sign_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(outcome) => outcomes.push(outcome),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        finished = true;
+                        break;
                     }
                 }
             }
         }
-
-        // Временные DER-файлы сертификатов из хранилища больше не нужны.
-        for cert in &prepared {
-            if !cert.imported {
-                let _ = std::fs::remove_file(&cert.path);
-            }
+        for outcome in outcomes {
+            self.apply_sign_outcome(outcome);
         }
 
-        // Отчёт о подписях — в каждую папку, где появились подписи.
+        if finished {
+            self.sign_rx = None;
+            self.finish_signing();
+        } else {
+            if let Some(state) = &mut self.signing {
+                if state.started == 0.0 {
+                    state.started = ctx.input(|i| i.time);
+                }
+            }
+            ctx.request_repaint_after(Duration::from_millis(40));
+        }
+    }
+
+    fn apply_sign_outcome(&mut self, outcome: SignOutcome) {
+        let SignOutcome {
+            idx,
+            created,
+            errors,
+        } = outcome;
+
+        if let Some(state) = &mut self.signing {
+            state.done += 1;
+            state.errors += errors.len();
+        }
+
+        if created.is_empty() {
+            return;
+        }
+
+        let signed_at = chrono::Local::now()
+            .format("%d.%m.%Y %H:%M")
+            .to_string();
+        if let Some(file) = self.files.get_mut(idx) {
+            for (subject, path) in &created {
+                file.signatures.push(SignatureInfo {
+                    subject: subject.clone(),
+                    path: Some(path.clone()),
+                    signed_at: signed_at.clone(),
+                });
+            }
+            file.status = FileStatus::Signed;
+
+            if let Some(dir) = file.path.parent() {
+                if let Some(state) = &mut self.signing {
+                    if !state.dirs.iter().any(|d| d == dir) {
+                        state.dirs.push(dir.to_path_buf());
+                    }
+                }
+            }
+
+            if self.pack_zip {
+                let mut unique: Vec<(String, PathBuf)> = Vec::new();
+                for (subject, path) in &created {
+                    if !unique.iter().any(|(_, p)| p == path) {
+                        unique.push((subject.clone(), path.clone()));
+                    }
+                }
+                let zip_path = file.zip_path();
+                let _ = write_zip(&zip_path, &unique);
+            }
+        }
+    }
+
+    fn finish_signing(&mut self) {
+        let Some(state) = self.signing.take() else {
+            return;
+        };
+
+        for cert in &state.temp_certs {
+            let _ = std::fs::remove_file(cert);
+        }
+
         let mut report_errors = 0;
-        for dir in &signed_dirs {
-            if let Err(e) = self.write_reports(dir) {
+        for dir in &state.dirs {
+            if self.write_reports(dir).is_err() {
                 report_errors += 1;
-                errors.push(format!("Отчёт: {}", e));
             }
         }
-        if let Some(dir) = signed_dirs.first() {
+        if let Some(dir) = state.dirs.first() {
             self.last_signed_dir = Some(dir.clone());
         }
 
-        if errors.is_empty() {
-            self.message = format!(
-                "Подписано файлов: {} · подписей: {} · отчёты: {}",
-                signed_files,
-                signed_sigs,
-                signed_dirs.len()
-            );
-        } else {            let suffix = if report_errors > 0 {
-                format!(", ошибок отчётов: {}", report_errors)
-            } else {
-                String::new()
-            };
-            self.message = format!(
-                "Подписано файлов: {}, подписей: {} · ошибок: {} ({}){}",
-                signed_files,
-                signed_sigs,
-                errors.len(),
-                errors.first().cloned().unwrap_or_default(),
-                suffix
-            );
+        let signed_sigs: usize = self
+            .files
+            .iter()
+            .map(|f| f.signatures.len())
+            .sum::<usize>();
+        let signed_files = self
+            .files
+            .iter()
+            .filter(|f| f.status == FileStatus::Signed)
+            .count();
+
+        let mut text = format!(
+            "Подписано файлов: {} · подписей: {} · отчёты: {}",
+            signed_files,
+            signed_sigs,
+            state.dirs.len()
+        );
+        if state.errors > 0 {
+            text.push_str(&format!(" · ошибок: {}", state.errors));
         }
+        if report_errors > 0 {
+            text.push_str(&format!(" · ошибок отчётов: {}", report_errors));
+        }
+        self.message = text;
     }
 
     /// Строки отчёта по всем документам из указанной папки.
@@ -4266,6 +4475,28 @@ fn round_add_button(ui: &mut Ui, diameter: f32) -> Response {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp
+}
+
+/// Кнопка подписания в состоянии «идёт подписание» — вращающийся индикатор.
+fn sign_spinner(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(58.0), Sense::hover());
+    let p = ui.painter();
+    let c = rect.center();
+    paint_round_shadow(p, c, 29.0);
+    p.circle_filled(c, 29.0, ACCENT);
+    let t = ui.input(|i| i.time) as f32 * 5.0;
+    for i in 0..8 {
+        let a = t + i as f32 * 0.55;
+        let alpha = 30 + i as u32 * 26;
+        let r = 21.0;
+        p.circle_filled(
+            Pos2::new(c.x + r * a.cos(), c.y + r * a.sin()),
+            2.5,
+            Color32::from_rgba_unmultiplied(255, 255, 255, alpha.min(255) as u8),
+        );
+    }
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 fn action_button(ui: &mut Ui, icon: Icon) -> Response {
