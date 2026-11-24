@@ -317,7 +317,13 @@ pub struct CryptoLineApp {
     large_sign_files: Option<Vec<String>>,
     update_latest: Option<String>,
     update_url: Option<String>,
+    update_setup: Option<String>,
+    update_notes: String,
     update_error: Option<String>,
+    update_rx: Option<mpsc::Receiver<Option<String>>>,
+    update_manual: bool,
+    update_dialog: bool,
+    update_auto_done: bool,
 }
 
 /// Пара «документ — подпись» на экране массовой проверки.
@@ -404,7 +410,13 @@ impl Default for CryptoLineApp {
             large_sign_files: None,
             update_latest: None,
             update_url: None,
+            update_setup: None,
+            update_notes: String::new(),
             update_error: None,
+            update_rx: None,
+            update_manual: false,
+            update_dialog: false,
+            update_auto_done: false,
         }
     }
 }
@@ -461,7 +473,19 @@ impl eframe::App for CryptoLineApp {
         }
         self.poll_hash();
         self.poll_signing(ctx);
+        self.poll_updates(ctx);
         self.handle_dropped(ctx);
+
+        // Проверка обновлений при запуске — один раз, после заставки.
+        let splash_done = self.splash_skip
+            || self
+                .splash_start
+                .map(|s| (ctx.input(|i| i.time) - s) as f32 >= SPLASH_LEN)
+                .unwrap_or(false);
+        if !self.update_auto_done && splash_done {
+            self.update_auto_done = true;
+            self.check_updates(false);
+        }
 
         // Заставка: пока она видна, остальной интерфейс не рисуем и не опрашиваем.
         if !self.splash_skip {
@@ -573,6 +597,7 @@ impl eframe::App for CryptoLineApp {
         self.confirm_delete_dialog(ctx);
         self.large_sign_dialog(ctx);
         self.drop_overlay(ctx);
+        self.update_dialog(ctx);
         self.resize_borders(ctx);
     }
 }
@@ -2707,10 +2732,14 @@ impl CryptoLineApp {
                         );
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if accent_button(ui, "Проверить обновления", Icon::Download)
-                            .clicked()
-                        {
-                            self.check_updates();
+                        let busy = self.update_rx.is_some();
+                        let label = if busy {
+                            "Проверка…"
+                        } else {
+                            "Проверить обновления"
+                        };
+                        if accent_button(ui, label, Icon::Download).clicked() && !busy {
+                            self.check_updates(true);
                         }
                     });
                 });
@@ -2731,12 +2760,17 @@ impl CryptoLineApp {
                                     .font(theme::medium(13.0))
                                     .color(AMBER),
                             );
-                            if let Some(url) = self.update_url.clone() {
-                                if secondary_button(ui, "Открыть страницу", Icon::Download)
-                                    .clicked()
-                                {
+                            let link = self
+                                .update_setup
+                                .clone()
+                                .or_else(|| self.update_url.clone());
+                            if let Some(url) = link {
+                                if secondary_button(ui, "Скачать", Icon::Download).clicked() {
                                     open_external(&url);
                                 }
+                            }
+                            if secondary_button(ui, "Подробнее", Icon::Docs).clicked() {
+                                self.update_dialog = true;
                             }
                         });
                     } else {
@@ -2796,30 +2830,164 @@ impl CryptoLineApp {
             .unwrap_or_else(|| PathBuf::from("Просто подпись — инструкция.pdf"))
     }
 
-    fn check_updates(&mut self) {
+    /// Запускает проверку обновлений в фоне (и при старте, и по кнопке).
+    fn check_updates(&mut self, manual: bool) {
+        if self.update_rx.is_some() {
+            return;
+        }
         self.update_error = None;
-        self.update_latest = None;
-        self.update_url = None;
+        self.update_manual = manual;
+        if manual {
+            self.update_latest = None;
+            self.update_url = None;
+            self.update_setup = None;
+        }
 
-        match fetch_update_manifest() {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(fetch_update_manifest());
+        });
+        self.update_rx = Some(rx);
+    }
+
+    /// Забирает результат фоновой проверки обновлений.
+    fn poll_updates(&mut self, ctx: &egui::Context) {
+        if self.update_rx.is_none() {
+            return;
+        }
+        let mut result = None;
+        if let Some(rx) = &self.update_rx {
+            match rx.try_recv() {
+                Ok(value) => result = Some(value),
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(120));
+                    return;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => result = Some(None),
+            }
+        }
+        self.update_rx = None;
+
+        match result.flatten() {
             Some(json) => {
                 let latest = json_string(&json, "version").unwrap_or_default();
                 if latest.is_empty() {
-                    self.update_error =
-                        Some("Некорректный ответ сервера обновлений".to_string());
+                    if self.update_manual {
+                        self.update_error =
+                            Some("Некорректный ответ сервера обновлений".to_string());
+                    }
                     return;
                 }
                 let url = json_string(&json, "url").unwrap_or_default();
-                self.update_latest = Some(latest);
+                let setup = json_string(&json, "setup").unwrap_or_default();
+                let notes = json_string(&json, "notes").unwrap_or_default();
+                self.update_latest = Some(latest.clone());
                 self.update_url = if url.is_empty() { None } else { Some(url) };
+                self.update_setup = if setup.is_empty() { None } else { Some(setup) };
+                self.update_notes = notes;
+
+                if version_is_newer(&latest, env!("CARGO_PKG_VERSION")) {
+                    self.update_dialog = true;
+                }
             }
             None => {
-                self.update_error = Some(
-                    "Не удалось проверить обновления. Проверьте подключение к интернету."
-                        .to_string(),
-                );
+                if self.update_manual {
+                    self.update_error = Some(
+                        "Не удалось проверить обновления. Проверьте подключение к интернету."
+                            .to_string(),
+                    );
+                }
             }
         }
+    }
+
+    /// Модальное окно «Доступна новая версия».
+    fn update_dialog(&mut self, ctx: &egui::Context) {
+        if !self.update_dialog {
+            return;
+        }
+        let Some(latest) = self.update_latest.clone() else {
+            self.update_dialog = false;
+            return;
+        };
+        let mut close = false;
+        let mut download = false;
+
+        let screen = ctx.screen_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("update_modal"),
+        ));
+        painter.rect_filled(screen, 0.0, Color32::from_black_alpha(110));
+
+        egui::Area::new(egui::Id::new("update_dialog"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(Pos2::new(screen.center().x - 230.0, screen.center().y - 120.0))
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(BG_PANEL)
+                    .rounding(Rounding::same(16.0))
+                    .shadow(theme::floating_shadow())
+                    .inner_margin(Margin::same(22.0))
+                    .show(ui, |ui| {
+                        ui.set_width(420.0);
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
+                            icons::paint(ui.painter(), r, Icon::Download, ACCENT, 1.8);
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("Доступна новая версия")
+                                    .font(theme::medium(17.0))
+                                    .color(TEXT),
+                            );
+                        });
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "Установлена {} · доступна {}",
+                                env!("CARGO_PKG_VERSION"),
+                                latest
+                            ))
+                            .font(theme::regular(13.0))
+                            .color(TEXT_SOFT),
+                        );
+                        if !self.update_notes.is_empty() {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(&self.update_notes)
+                                    .font(theme::regular(12.5))
+                                    .color(TEXT_MUTED),
+                            );
+                        }
+                        ui.add_space(16.0);
+                        ui.horizontal(|ui| {
+                            if accent_button(ui, "Скачать обновление", Icon::Download).clicked() {
+                                download = true;
+                            }
+                            ui.add_space(8.0);
+                            if secondary_button(ui, "Позже", Icon::Close).clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+            });
+
+        if download {
+            let target = self
+                .update_setup
+                .clone()
+                .or_else(|| self.update_url.clone())
+                .unwrap_or_else(|| {
+                    "https://github.com/cherneyivan-cloud/prosto-podpis/releases/latest".to_string()
+                });
+            open_external(&target);
+            self.message = "Открыт браузер со страницей загрузки обновления".to_string();
+            close = true;
+        }
+        if close {
+            self.update_dialog = false;
+        }
+        ctx.request_repaint();
     }
 
     fn encrypt_screen(&mut self, ui: &mut Ui) {
@@ -5388,11 +5556,18 @@ const UPDATE_MANIFEST_URL: &str =
 /// Загружает манифест обновлений (curl, при отсутствии — PowerShell).
 fn fetch_update_manifest() -> Option<String> {
     // ?t= — чтобы CDN GitHub не отдавал закэшированный манифест.
+    // PROSTO_PODPIS_UPDATES_URL — отладочное переопределение адреса.
+    let base = std::env::var("PROSTO_PODPIS_UPDATES_URL")
+        .unwrap_or_else(|_| UPDATE_MANIFEST_URL.to_string());
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let url = format!("{}?t={}", UPDATE_MANIFEST_URL, stamp);
+    let url = if base.starts_with("http") {
+        format!("{}?t={}", base, stamp)
+    } else {
+        base
+    };
     if let Ok(output) = std::process::Command::new("curl.exe")
         .args(["-s", "-L", "--max-time", "10", &url])
         .output()

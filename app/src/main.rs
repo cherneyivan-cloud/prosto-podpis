@@ -15,7 +15,7 @@ pub(crate) const ICON_SIZE: u32 = 256;
 /// Логотип для сайдбара: обрезанный по содержимому, RGBA 192×255.
 pub(crate) const LOGO_RGBA: &[u8] = include_bytes!("../assets/app_logo.rgba");
 pub(crate) const LOGO_W: u32 = 192;
-pub(crate) const LOGO_H: u32 = 255;
+pub(crate) const LOGO_H: u32 = 244;
 /// Маска росчерка для анимации заставки: белая, RGBA 420×265.
 pub(crate) const SIG_RGBA: &[u8] = include_bytes!("../assets/app_sig.rgba");
 pub(crate) const SIG_W: u32 = 420;
