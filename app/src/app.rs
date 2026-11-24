@@ -2186,11 +2186,14 @@ impl CryptoLineApp {
         let mut doc_matched = vec![false; docs.len()];
 
         for sig in &sigs {
-            let sig_key = verify_name_key(sig, true);
+            let candidates = verify_name_candidates(sig);
             let mut best: Option<(usize, f32)> = None;
             for (doc_index, doc) in docs.iter().enumerate() {
                 let doc_key = verify_name_key(doc, false);
-                let score = name_similarity(&sig_key, &doc_key);
+                let score = candidates
+                    .iter()
+                    .map(|key| name_similarity(key, &doc_key))
+                    .fold(0.0f32, f32::max);
                 if score >= 0.8 && best.map_or(true, |(_, best_score)| score > best_score) {
                     best = Some((doc_index, score));
                 }
@@ -2532,40 +2535,218 @@ impl CryptoLineApp {
         page_header(
             ui,
             "Шифрование",
-            "Шифрование документов для получателей по ГОСТ Р 34.12",
+            "Документы шифруются на сертификаты получателей · ГОСТ Р 34.12-2015 (Кузнечик)",
         );
-        ui.add_space(40.0);
-        ui.vertical_centered(|ui| {
-            let (r, _) = ui.allocate_exact_size(Vec2::splat(92.0), Sense::hover());
-            let p = ui.painter();
-            p.circle_filled(r.center(), 46.0, ACCENT_SOFT);
-            icons::paint(
-                p,
-                Rect::from_center_size(r.center(), Vec2::splat(38.0)),
-                Icon::Lock,
-                ACCENT,
-                2.0,
-            );
-            ui.add_space(16.0);
-            ui.label(
-                RichText::new("Модуль шифрования готовится")
-                    .font(theme::medium(19.0))
-                    .color(TEXT),
-            );
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(
-                    "Будет доступно шифрование документов на сертификаты получателей\n\
-                     через КриптоПро CSP. Подпись и проверка уже работают.",
-                )
-                .font(theme::regular(13.0))
-                .color(TEXT_MUTED),
-            );
-            ui.add_space(18.0);
-            if accent_button(ui, "Перейти к документам", Icon::Docs).clicked() {
-                self.active_nav = Nav::Docs;
+        ui.add_space(14.0);
+
+        ui.horizontal(|ui| {
+            if accent_button(ui, "Зашифровать", Icon::Lock).clicked() {
+                self.encrypt_selected();
+            }
+            ui.add_space(8.0);
+            if secondary_button(ui, "Добавить документы", Icon::Plus).clicked() {
+                self.add_files();
             }
         });
+
+        ui.add_space(16.0);
+
+        if self.files.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(60.0);
+                ui.label(
+                    RichText::new("Нет документов")
+                        .font(theme::medium(17.0))
+                        .color(TEXT),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Добавьте файлы кнопкой «Добавить документы» или перетащите их в окно.",
+                    )
+                    .font(theme::regular(12.5))
+                    .color(TEXT_MUTED),
+                );
+            });
+            return;
+        }
+
+        let docs: Vec<(usize, String, String)> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (i, f.name.clone(), f.modified.clone()))
+            .collect();
+        let certs: Vec<(usize, String, String)> = self
+            .certificates
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, c.subject.clone(), c.issuer.clone()))
+            .collect();
+
+        let mut toggle_doc: Option<usize> = None;
+        let mut toggle_cert: Option<usize> = None;
+
+        ui.columns(2, |cols| {
+            let left = &mut cols[0];
+            left.label(
+                RichText::new(format!("Документы · {}", docs.len()))
+                    .font(theme::medium(13.0))
+                    .color(TEXT_MUTED),
+            );
+            left.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .id_source("encrypt_docs")
+                .max_height(430.0)
+                .show(left, |ui| {
+                    for (idx, name, date) in &docs {
+                        let selected = self.selected_files.contains(idx);
+                        if list_row(ui, selected, name, date).clicked() {
+                            toggle_doc = Some(*idx);
+                        }
+                        ui.add_space(6.0);
+                    }
+                });
+
+            let right = &mut cols[1];
+            right.label(
+                RichText::new(format!("Получатели · {}", certs.len()))
+                    .font(theme::medium(13.0))
+                    .color(TEXT_MUTED),
+            );
+            right.add_space(8.0);
+            if certs.is_empty() {
+                right.label(
+                    RichText::new("Загрузите сертификаты в разделе «Сертификаты»")
+                        .font(theme::regular(12.5))
+                        .color(TEXT_DIM),
+                );
+            }
+            egui::ScrollArea::vertical()
+                .id_source("encrypt_certs")
+                .max_height(430.0)
+                .show(right, |ui| {
+                    for (idx, subject, issuer) in &certs {
+                        let selected = self.selected_certs.contains(idx);
+                        if list_row(ui, selected, subject, issuer).clicked() {
+                            toggle_cert = Some(*idx);
+                        }
+                        ui.add_space(6.0);
+                    }
+                });
+        });
+
+        if let Some(idx) = toggle_doc {
+            if let Some(pos) = self.selected_files.iter().position(|i| *i == idx) {
+                self.selected_files.remove(pos);
+            } else {
+                self.selected_files.push(idx);
+            }
+            self.active_file = Some(idx);
+        }
+        if let Some(idx) = toggle_cert {
+            if let Some(pos) = self.selected_certs.iter().position(|i| *i == idx) {
+                self.selected_certs.remove(pos);
+            } else {
+                self.selected_certs.push(idx);
+            }
+        }
+    }
+
+    /// Шифрует выбранные документы на выбранные сертификаты получателей.
+    fn encrypt_selected(&mut self) {
+        let mut docs = self.selected_files.clone();
+        if docs.is_empty() {
+            if let Some(active) = self.active_file {
+                docs.push(active);
+            }
+        }
+        if docs.is_empty() {
+            self.message = "Выберите документы для шифрования".to_string();
+            return;
+        }
+        if self.selected_certs.is_empty() {
+            self.message = "Выберите хотя бы одного получателя".to_string();
+            return;
+        }
+
+        let mut cert_paths: Vec<PathBuf> = Vec::new();
+        for idx in self.selected_certs.clone() {
+            if let Some((path, _)) = self.resolve_cert(idx) {
+                cert_paths.push(path);
+            }
+        }
+        if cert_paths.is_empty() {
+            self.message = "Не удалось подготовить сертификаты получателей".to_string();
+            return;
+        }
+
+        let cli = self.cli_path();
+        if !cli.exists() {
+            self.message = format!("CLI не найдена: {}", cli.display());
+            return;
+        }
+
+        let mut done = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        let mut cipher = String::new();
+
+        for idx in docs {
+            let Some(file) = self.files.get(idx) else {
+                continue;
+            };
+            let mut out = file.path.clone().into_os_string();
+            out.push(".enc");
+            let out = PathBuf::from(out);
+
+            let mut cmd = std::process::Command::new(&cli);
+            cmd.arg("encrypt").arg("--file").arg(&file.path);
+            for cert in &cert_paths {
+                cmd.arg("--cert").arg(cert);
+            }
+            cmd.arg("--output").arg(&out);
+
+            match cmd.output() {
+                Ok(result) if result.status.success() => {
+                    let stdout = String::from_utf8_lossy(&result.stdout);
+                    if let Some(line) = stdout.lines().find(|l| l.trim().starts_with("алгоритм:")) {
+                        cipher = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                    }
+                    done += 1;
+                }
+                Ok(result) => {
+                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    let text = stderr
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("ошибка шифрования")
+                        .trim()
+                        .to_string();
+                    errors.push(format!("{}: {}", file.name, text));
+                }
+                Err(e) => errors.push(format!("{}: {}", file.name, e)),
+            }
+        }
+
+        self.message = if done > 0 {
+            let mut text = format!("Зашифровано файлов: {}", done);
+            if !cipher.is_empty() {
+                text.push_str(&format!(" · {}", cipher));
+            }
+            if !errors.is_empty() {
+                text.push_str(&format!(" · ошибок: {}", errors.len()));
+            }
+            text
+        } else {
+            format!(
+                "Шифрование не выполнено: {}",
+                errors.first().cloned().unwrap_or_default()
+            )
+        };
+
+        if !errors.is_empty() {
+            self.active_nav = Nav::Encrypt;
+        }
     }
 }
 
@@ -3864,8 +4045,56 @@ fn truncated(
     ui.fonts(|f| f.layout_job(job))
 }
 
-fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+/// Строка списка с отметкой выбора — для экрана шифрования.
+fn list_row(ui: &mut Ui, selected: bool, title: &str, subtitle: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), 52.0),
+        Sense::click(),
+    );
+    let p = ui.painter();
+    p.rect_filled(
+        rect,
+        Rounding::same(10.0),
+        if resp.hovered() { BG_CARD_HOVER } else { BG_CARD },
+    );
+    p.text(
+        Pos2::new(rect.left() + 14.0, rect.center().y - 8.0),
+        Align2::LEFT_CENTER,
+        title,
+        theme::medium(13.0),
+        TEXT,
+    );
+    p.text(
+        Pos2::new(rect.left() + 14.0, rect.center().y + 9.0),
+        Align2::LEFT_CENTER,
+        subtitle,
+        theme::regular(11.5),
+        TEXT_MUTED,
+    );
+    let c = Pos2::new(rect.right() - 20.0, rect.center().y);
+    p.circle_filled(c, 9.0, if selected { ACCENT } else { BG_SUNKEN });
+    p.circle_stroke(
+        c,
+        9.0,
+        Stroke::new(1.2, if selected { ACCENT } else { DIVIDER }),
+    );
+    if selected {
+        p.add(egui::Shape::line(
+            vec![
+                Pos2::new(c.x - 4.0, c.y + 0.5),
+                Pos2::new(c.x - 1.0, c.y + 3.5),
+                Pos2::new(c.x + 4.5, c.y - 3.0),
+            ],
+            Stroke::new(1.8, Color32::WHITE),
+        ));
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
+fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     let p = ui.painter();
     if resp.hovered() {
         p.rect_filled(rect, Rounding::same(9.0), BG_CARD_HOVER);
@@ -4831,6 +5060,33 @@ fn find_signatures_for(doc: &Path) -> Vec<SignatureInfo> {
 
 /// Ключ имени для сопоставления: без расширений, только буквы и цифры.
 fn verify_name_key(path: &Path, is_signature: bool) -> String {
+    alnum(&strip_name(path, is_signature))
+}
+
+/// Варианты ключа подписи: полный и без хвоста `_Фамилия_ИО`,
+/// который программа дописывает после успешной проверки.
+fn verify_name_candidates(path: &Path) -> Vec<String> {
+    let base = strip_name(path, true);
+    let mut out = vec![alnum(&base)];
+    let mut current = base;
+    for _ in 0..2 {
+        match current.rfind('_') {
+            Some(pos) => {
+                current.truncate(pos);
+                out.push(alnum(&current));
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+fn alnum(value: &str) -> String {
+    value.chars().filter(|ch| ch.is_alphanumeric()).collect()
+}
+
+/// Имя без расширения подписи и расширения документа.
+fn strip_name(path: &Path, is_signature: bool) -> String {
     let mut name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -4853,8 +5109,7 @@ fn verify_name_key(path: &Path, is_signature: bool) -> String {
             break;
         }
     }
-
-    name.chars().filter(|ch| ch.is_alphanumeric()).collect()
+    name
 }
 
 /// Сходство строк 0..1 по Левенштейну.

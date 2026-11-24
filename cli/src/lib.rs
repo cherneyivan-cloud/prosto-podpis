@@ -12,6 +12,7 @@ pub mod cms;
 pub mod crypto;
 pub mod certs;
 pub mod csp;
+pub mod envelope;
 
 pub use error::{CryptolineError, Result};
 pub use der::{DerParser, DerValue, DerElement};

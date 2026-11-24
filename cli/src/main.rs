@@ -63,6 +63,30 @@ enum Commands {
         #[arg(short, long)]
         cert: PathBuf,
     },
+    /// Зашифровать файл для получателей (CMS EnvelopedData)
+    Encrypt {
+        /// Путь к файлу
+        #[arg(short, long)]
+        file: PathBuf,
+
+        /// Сертификаты получателей (DER). Можно несколько: --cert a --cert b
+        #[arg(short, long, required = true)]
+        cert: Vec<PathBuf>,
+
+        /// Куда сохранить (по умолчанию <файл>.enc)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Расшифровать файл, зашифрованный для вас
+    Decrypt {
+        /// Путь к файлу .enc
+        #[arg(short, long)]
+        file: PathBuf,
+
+        /// Куда сохранить (по умолчанию без .enc)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -86,6 +110,16 @@ fn main() -> Result<()> {
         Commands::Cert { cert } => {
             show_cert(&cert)?;
         }
+        Commands::Encrypt {
+            file,
+            cert,
+            output,
+        } => {
+            encrypt_file(&file, &cert, &output)?;
+        }
+        Commands::Decrypt { file, output } => {
+            decrypt_file(&file, &output)?;
+        }
     }
 
     Ok(())
@@ -96,6 +130,64 @@ fn read_file(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| {
         CryptolineError::FileError(format!("{}: {}", path.display(), e))
     })
+}
+
+/// Загружает сертификат в DER: PEM раскодируется, DER берётся как есть.
+fn read_cert_der(path: &Path) -> Result<Vec<u8>> {
+    let data = read_file(path)?;
+    if data.starts_with(b"-----BEGIN") {
+        let text = String::from_utf8_lossy(&data);
+        let body: String = text
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<Vec<_>>()
+            .join("");
+        return base64::engine::general_purpose::STANDARD
+            .decode(body.trim())
+            .map_err(|e| CryptolineError::Base64Error(e.to_string()));
+    }
+    Ok(data)
+}
+
+fn encrypt_file(file: &PathBuf, certs: &[PathBuf], output: &Option<PathBuf>) -> Result<()> {
+    let mut ders = Vec::new();
+    for cert in certs {
+        ders.push(read_cert_der(cert)?);
+    }
+
+    let out = match output {
+        Some(p) => p.clone(),
+        None => {
+            let mut name = file.clone().into_os_string();
+            name.push(".enc");
+            PathBuf::from(name)
+        }
+    };
+
+    let info = cryptoline_rust::envelope::encrypt_file(file, &ders, &out)?;
+    println!("✓ Зашифровано: {}", out.display());
+    println!("  алгоритм: {}", info.cipher);
+    println!("  получателей: {}", certs.len());
+    Ok(())
+}
+
+fn decrypt_file(file: &PathBuf, output: &Option<PathBuf>) -> Result<()> {
+    let out = match output {
+        Some(p) => p.clone(),
+        None => {
+            if file.extension().and_then(|e| e.to_str()) == Some("enc") {
+                file.with_extension("")
+            } else {
+                let mut name = file.clone().into_os_string();
+                name.push(".dec");
+                PathBuf::from(name)
+            }
+        }
+    };
+
+    cryptoline_rust::envelope::decrypt_file(file, &out)?;
+    println!("✓ Расшифровано: {}", out.display());
+    Ok(())
 }
 
 fn sign_file(
