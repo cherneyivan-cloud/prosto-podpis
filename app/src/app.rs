@@ -1252,6 +1252,24 @@ impl CryptoLineApp {
         p.galley(Pos2::new(text_x, card.top() + 37.0), meta_galley, TEXT_MUTED);
 
         let status = f.status;
+        // Плавный перелив цвета статуса: очередь → подписан → зашифрован.
+        let pending_t = ui.ctx().animate_bool_with_time(
+            egui::Id::new(("st_pending", idx)),
+            status == FileStatus::Pending,
+            0.25,
+        );
+        let signed_t = ui.ctx().animate_bool_with_time(
+            egui::Id::new(("st_signed", idx)),
+            status == FileStatus::Signed,
+            0.25,
+        );
+        let encrypted_t = ui.ctx().animate_bool_with_time(
+            egui::Id::new(("st_encrypted", idx)),
+            status == FileStatus::Encrypted,
+            0.25,
+        );
+        let status_color = blend_status(AMBER, GREEN, ACCENT, pending_t, signed_t, encrypted_t);
+
         let chip_galley = ui.fonts(|fonts| {
             fonts.layout_no_wrap(
                 status.label().to_string(),
@@ -1264,16 +1282,20 @@ impl CryptoLineApp {
             Pos2::new(text_x, card.top() + 59.0),
             Vec2::new(chip_w, 20.0),
         );
-        p.rect_filled(chip, Rounding::same(6.0), BG_CHIP);
+        p.rect_filled(
+            chip,
+            Rounding::same(6.0),
+            lerp_color(BG_CHIP, status_color, 0.18),
+        );
         p.circle_filled(
             Pos2::new(chip.left() + 11.0, chip.center().y),
             3.0,
-            status.dot(),
+            status_color,
         );
         p.galley(
             Pos2::new(chip.left() + 19.0, chip.center().y - 8.0),
             chip_galley,
-            TEXT_SOFT,
+            lerp_color(TEXT_SOFT, status_color, 0.30),
         );
 
         // ФИО подписантов — справа от статуса.
@@ -1346,6 +1368,15 @@ impl CryptoLineApp {
                     ui.add_space(shift);
                 }
                 self.inspector_body(ui);
+
+                // Мягкое проявление содержимого при смене документа.
+                if progress < 0.999 {
+                    ui.painter().rect_filled(
+                        ui.max_rect(),
+                        0.0,
+                        fade_col(BG_WORKSPACE, 1.0 - progress),
+                    );
+                }
             },
         );
     }
@@ -4105,6 +4136,19 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     )
 }
 
+/// Смешивает три цвета по весам — для плавной смены статуса.
+fn blend_status(a: Color32, b: Color32, c: Color32, wa: f32, wb: f32, wc: f32) -> Color32 {
+    let total = (wa + wb + wc).max(0.001);
+    let mix = |x: u8, y: u8, z: u8| {
+        ((x as f32 * wa + y as f32 * wb + z as f32 * wc) / total) as u8
+    };
+    Color32::from_rgb(
+        mix(a.r(), b.r(), c.r()),
+        mix(a.g(), b.g(), c.g()),
+        mix(a.b(), b.b(), c.b()),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Мелкие виджеты
 // ---------------------------------------------------------------------------
@@ -4768,45 +4812,55 @@ fn avatar(ui: &mut Ui, name: &str, sub: &str, valid: &str) {
     );
 
     if resp.hovered() {
-        if let Some(pointer) = ui.ctx().pointer_hover_pos() {
-            let id = egui::Id::new(("signer_tip", name.to_string(), sub.to_string()));
-            egui::Area::new(id)
-                .order(egui::Order::Tooltip)
-                .fixed_pos(pointer + Vec2::new(16.0, 18.0))
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::none()
-                        .fill(Color32::WHITE)
-                        .rounding(Rounding::same(10.0))
-                        .shadow(theme::soft_shadow())
-                        .inner_margin(Margin {
-                            left: 14.0,
-                            right: 14.0,
-                            top: 10.0,
-                            bottom: 10.0,
-                        })
-                        .show(ui, |ui| {
-                            ui.set_max_width(260.0);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    // Белая подсказка плавно проявляется: opacity 0→1, scale 0.96→1.
+    let tip = ui.ctx().animate_bool_with_time(
+        egui::Id::new(("signer_hover", name, sub)),
+        resp.hovered(),
+        0.16,
+    );
+    if tip > 0.01 {
+        let id = egui::Id::new(("signer_tip", name, sub));
+        egui::Area::new(id)
+            .order(egui::Order::Tooltip)
+            .pivot(egui::Align2::LEFT_CENTER)
+            .fixed_pos(Pos2::new(rect.right() + 10.0, rect.center().y))
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::none()
+                    .fill(fade_col(Color32::WHITE, tip))
+                    .rounding(Rounding::same(10.0))
+                    .shadow(theme::soft_shadow())
+                    .inner_margin(Margin {
+                        left: 14.0,
+                        right: 14.0,
+                        top: 10.0,
+                        bottom: 10.0,
+                    })
+                    .show(ui, |ui| {
+                        ui.set_max_width(260.0 * (0.96 + 0.04 * tip));
+                        ui.label(
+                            RichText::new(name)
+                                .font(theme::medium(14.0))
+                                .color(fade_col(Color32::from_rgb(0x1F, 0x22, 0x2E), tip)),
+                        );
+                        ui.label(
+                            RichText::new(format!("Сертификат · {}", sub))
+                                .font(theme::regular(12.0))
+                                .color(fade_col(Color32::from_rgb(0x6B, 0x6F, 0x82), tip)),
+                        );
+                        if !valid.is_empty() {
+                            ui.add_space(4.0);
                             ui.label(
-                                RichText::new(name)
-                                    .font(theme::medium(14.0))
-                                    .color(Color32::from_rgb(0x1F, 0x22, 0x2E)),
-                            );
-                            ui.label(
-                                RichText::new(format!("Сертификат · {}", sub))
+                                RichText::new(format!("Действителен до: {}", valid))
                                     .font(theme::regular(12.0))
-                                    .color(Color32::from_rgb(0x6B, 0x6F, 0x82)),
+                                    .color(fade_col(Color32::from_rgb(0x3B, 0x3F, 0x50), tip)),
                             );
-                            if !valid.is_empty() {
-                                ui.add_space(4.0);
-                                ui.label(
-                                    RichText::new(format!("Действителен до: {}", valid))
-                                        .font(theme::regular(12.0))
-                                        .color(Color32::from_rgb(0x3B, 0x3F, 0x50)),
-                                );
-                            }
-                        });
-                });
-        }
+                        }
+                    });
+            });
     }
 }
 
@@ -4829,7 +4883,18 @@ fn related_files(ui: &mut Ui, file: &FileEntry) {
 
 fn file_badge(ui: &mut Ui, label: &str, color: Color32) {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(42.0), Sense::hover());
+    let lift = ui.ctx().animate_bool_with_time(
+        egui::Id::new(("badge_hover", label)),
+        resp.hovered(),
+        0.16,
+    );
     let p = ui.painter();
+    let rect = rect.translate(Vec2::new(0.0, -2.0 * lift));
+    if lift > 0.02 {
+        p.add(egui::Shape::Mesh(
+            theme::soft_shadow().tessellate(rect, Rounding::same(11.0)),
+        ));
+    }
     p.rect_filled(rect, Rounding::same(11.0), color);
     p.text(
         rect.center(),
