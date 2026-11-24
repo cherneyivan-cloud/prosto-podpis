@@ -16,6 +16,22 @@ use crate::icons::{self, Icon};
 use crate::report::ReportRow;
 use crate::theme::{self, *};
 
+/// Команда без отдельного консольного окна.
+///
+/// CLI и служебные утилиты (powershell, curl, reg) — консольные программы:
+/// запущенные из GUI, они создают своё окно консоли. Флаг CREATE_NO_WINDOW
+/// подавляет его, поэтому при подписи и проверке ничего не мелькает.
+fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Файлы больше 50 МБ подписываем только после подтверждения.
 const LARGE_FILE_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -3158,7 +3174,7 @@ impl CryptoLineApp {
             out.push(".enc");
             let out = PathBuf::from(out);
 
-            let mut cmd = std::process::Command::new(&cli);
+            let mut cmd = hidden_command(&cli);
             cmd.arg("encrypt").arg("--file").arg(&file.path);
             for cert in &cert_paths {
                 cmd.arg("--cert").arg(cert);
@@ -3527,7 +3543,7 @@ impl CryptoLineApp {
         self.hash_pending = Some(idx);
         std::thread::spawn(move || {
             let mut value = String::new();
-            if let Ok(out) = std::process::Command::new(cli)
+            if let Ok(out) = hidden_command(cli)
                 .arg("hash")
                 .arg("--file")
                 .arg(&path)
@@ -3575,7 +3591,7 @@ impl CryptoLineApp {
             out_file.display()
         );
 
-        let output = std::process::Command::new("powershell")
+        let output = hidden_command("powershell")
             .args(["-NoProfile", "-Command", &script])
             .output();
 
@@ -3725,7 +3741,7 @@ impl CryptoLineApp {
     }
 
     fn certificate_subject(&self, path: &Path) -> Option<String> {
-        let out = std::process::Command::new(self.cli_path())
+        let out = hidden_command(self.cli_path())
             .arg("cert")
             .arg("--cert")
             .arg(path)
@@ -3790,7 +3806,7 @@ impl CryptoLineApp {
             cert.thumbprint,
             temp_cert.display()
         );
-        let ok = std::process::Command::new("powershell")
+        let ok = hidden_command("powershell")
             .args(["-NoProfile", "-Command", &script])
             .output()
             .map(|o| o.status.success())
@@ -5497,11 +5513,11 @@ fn sha256_hex(path: &Path) -> String {
 fn open_in_explorer(path: &Path) {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("explorer").arg(path).spawn();
+        let _ = hidden_command("explorer").arg(path).spawn();
     }
     #[cfg(not(windows))]
     {
-        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+        let _ = hidden_command("xdg-open").arg(path).spawn();
     }
 }
 
@@ -5566,7 +5582,7 @@ fn fetch_update_manifest() -> Option<String> {
     } else {
         base
     };
-    if let Ok(output) = std::process::Command::new("curl.exe")
+    if let Ok(output) = hidden_command("curl.exe")
         .args(["-s", "-L", "--max-time", "10", &url])
         .output()
     {
@@ -5584,7 +5600,7 @@ fn fetch_update_manifest() -> Option<String> {
         url,
         temp.display()
     );
-    let ok = std::process::Command::new("powershell")
+    let ok = hidden_command("powershell")
         .args(["-NoProfile", "-Command", &script])
         .output()
         .map(|o| o.status.success())
@@ -5634,11 +5650,11 @@ fn version_is_newer(latest: &str, current: &str) -> bool {
 fn open_external(url: &str) {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("explorer").arg(url).spawn();
+        let _ = hidden_command("explorer").arg(url).spawn();
     }
     #[cfg(not(windows))]
     {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        let _ = hidden_command("xdg-open").arg(url).spawn();
     }
 }
 
@@ -5915,7 +5931,7 @@ fn owner_title(value: &str) -> String {
 }
 
 fn run_verify_cli(cli: &Path, file: &Path, sig: &Path) -> (bool, String) {
-    let run = |sig_path: &Path| match std::process::Command::new(cli)
+    let run = |sig_path: &Path| match hidden_command(cli)
         .arg("verify")
         .arg("--file")
         .arg(file)
@@ -5962,7 +5978,7 @@ fn run_sign_cli(
     format: SigFormat,
     encoding: SigEncoding,
 ) -> Result<PathBuf, String> {
-    let mut cmd = std::process::Command::new(cli);
+    let mut cmd = hidden_command(cli);
     cmd.arg("sign").arg("--file").arg(file);
     for cert in certs {
         cmd.arg("--cert").arg(cert);
