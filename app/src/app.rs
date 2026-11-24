@@ -2794,7 +2794,7 @@ impl CryptoLineApp {
                         ui.label(
                             RichText::new(format!(
                                 "Установлена последняя версия ({})",
-                                latest
+                                env!("CARGO_PKG_VERSION")
                             ))
                             .font(theme::regular(12.5))
                             .color(GREEN),
@@ -5567,28 +5567,43 @@ fn file_display(path: &Path) -> String {
 const UPDATE_MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/cherneyivan-cloud/prosto-podpis-updates/main/latest.json";
 
+/// Свежий манифест через GitHub API: raw.githubusercontent кэшируется на минуты.
+const UPDATE_MANIFEST_API: &str = "https://api.github.com/repos/cherneyivan-cloud/prosto-podpis-updates/contents/latest.json?ref=main";
+
 /// Загружает манифест обновлений (curl, при отсутствии — PowerShell).
 fn fetch_update_manifest() -> Option<String> {
-    // ?t= — чтобы CDN GitHub не отдавал закэшированный манифест.
     // PROSTO_PODPIS_UPDATES_URL — отладочное переопределение адреса.
-    let base = std::env::var("PROSTO_PODPIS_UPDATES_URL")
-        .unwrap_or_else(|_| UPDATE_MANIFEST_URL.to_string());
+    if let Ok(custom) = std::env::var("PROSTO_PODPIS_UPDATES_URL") {
+        return fetch_url(&custom, false);
+    }
+
+    // Сначала API (данные всегда свежие), затем raw как запасной вариант.
+    fetch_url(UPDATE_MANIFEST_API, true).or_else(|| fetch_url(UPDATE_MANIFEST_URL, false))
+}
+
+/// Скачивает текст по URL через curl с запретом кэша; запасной путь — PowerShell.
+fn fetch_url(url: &str, api: bool) -> Option<String> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let url = if base.starts_with("http") {
-        format!("{}?t={}", base, stamp)
+    let url = if url.starts_with("http") && !api {
+        format!("{}?t={}", url, stamp)
     } else {
-        base
+        url.to_string()
     };
-    if let Ok(output) = hidden_command("curl.exe")
-        .args(["-s", "-L", "--max-time", "10", &url])
-        .output()
-    {
+
+    let mut cmd = hidden_command("curl.exe");
+    cmd.args(["-s", "-L", "--max-time", "10"]);
+    cmd.args(["-H", "Cache-Control: no-cache", "-H", "Pragma: no-cache"]);
+    if api {
+        cmd.args(["-H", "Accept: application/vnd.github.raw"]);
+    }
+    if let Ok(output) = cmd.arg(&url).output() {
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !text.is_empty() {
+            // API при ошибке отдаёт {"message": ...} — это не манифест.
+            if text.contains("\"version\"") {
                 return Some(text);
             }
         }
@@ -5596,7 +5611,7 @@ fn fetch_update_manifest() -> Option<String> {
 
     let temp = std::env::temp_dir().join("prosto_podpis_update.json");
     let script = format!(
-        "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri '{}' -TimeoutSec 10 -OutFile '{}'",
+        "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Headers @{{'Cache-Control'='no-cache'}} -Uri '{}' -TimeoutSec 10 -OutFile '{}'",
         url,
         temp.display()
     );
@@ -5611,7 +5626,7 @@ fn fetch_update_manifest() -> Option<String> {
         let _ = std::fs::remove_file(&temp);
         return text
             .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
+            .filter(|value| value.contains("\"version\""));
     }
     None
 }
