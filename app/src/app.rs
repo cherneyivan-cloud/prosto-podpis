@@ -358,6 +358,7 @@ struct SignState {
     started: f64,
     dirs: Vec<PathBuf>,
     errors: usize,
+    sigs: usize,
     temp_certs: Vec<PathBuf>,
 }
 
@@ -2987,7 +2988,6 @@ impl CryptoLineApp {
         if close {
             self.update_dialog = false;
         }
-        ctx.request_repaint();
     }
 
     fn encrypt_screen(&mut self, ui: &mut Ui) {
@@ -3965,6 +3965,7 @@ impl CryptoLineApp {
             started: 0.0,
             dirs: Vec::new(),
             errors: errors.len(),
+            sigs: 0,
             temp_certs,
         });
         self.message = format!("Подписание документов: 0 из {}", file_indices.len());
@@ -4016,6 +4017,7 @@ impl CryptoLineApp {
         if let Some(state) = &mut self.signing {
             state.done += 1;
             state.errors += errors.len();
+            state.sigs += created.len();
         }
 
         if created.is_empty() {
@@ -4075,11 +4077,7 @@ impl CryptoLineApp {
             self.last_signed_dir = Some(dir.clone());
         }
 
-        let signed_sigs: usize = self
-            .files
-            .iter()
-            .map(|f| f.signatures.len())
-            .sum::<usize>();
+        let signed_sigs = state.sigs;
         let signed_files = self
             .files
             .iter()

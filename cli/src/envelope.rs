@@ -111,42 +111,117 @@ mod win {
         fn CertFreeCertificateContext(ctx: PCertContext) -> i32;
     }
 
-    #[link(name = "advapi32")]
-    extern "system" {
-        fn CryptAcquireContextA(
-            ph_prov: *mut Handle,
-            sz_container: *const c_char,
-            sz_provider: *const c_char,
-            dw_prov_type: u32,
-            dw_flags: u32,
-        ) -> i32;
-        fn CryptReleaseContext(h_prov: Handle, dw_flags: u32) -> i32;
-    }
-
     fn last_error() -> String {
         std::io::Error::last_os_error().to_string()
     }
 
-    /// Определяет, каким алгоритмом реально зашифровано содержимое.
-    fn detect_cipher(der: &[u8]) -> Cipher {
-        const KUZ: [u8; 10] = [0x06, 0x08, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x01, 0x05, 0x02];
-        const MAG: [u8; 10] = [0x06, 0x08, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x01, 0x05, 0x01];
-        let tail = &der[der.len().saturating_sub(600)..];
-        if tail.windows(KUZ.len()).any(|w| w == KUZ) {
-            Cipher::Kuznyechik
-        } else if tail.windows(MAG.len()).any(|w| w == MAG) {
-            Cipher::Magma
+    /// Владелец контекста сертификата: освобождает его при выходе из области.
+    struct CertCtx(PCertContext);
+
+    impl CertCtx {
+        fn create(der: &[u8]) -> Option<Self> {
+            let ctx =
+                unsafe { CertCreateCertificateContext(X509_ASN_ENCODING, der.as_ptr(), der.len() as u32) };
+            if ctx.is_null() {
+                None
+            } else {
+                Some(CertCtx(ctx))
+            }
+        }
+    }
+
+    impl Drop for CertCtx {
+        fn drop(&mut self) {
+            unsafe { CertFreeCertificateContext(self.0) };
+        }
+    }
+
+    // --- Разбор контейнера: какой алгоритм реально применил CSP ---------------
+
+    /// Читает TLV: (тег, смещение значения, длина значения).
+    fn tlv(buf: &[u8], pos: usize) -> Option<(u8, usize, usize)> {
+        if pos + 2 > buf.len() {
+            return None;
+        }
+        let tag = buf[pos];
+        let first = buf[pos + 1];
+        let (len, header) = if first & 0x80 == 0 {
+            (first as usize, 2usize)
         } else {
-            Cipher::Gost28147
+            let n = (first & 0x7f) as usize;
+            if n == 0 || n > 4 || pos + 2 + n > buf.len() {
+                return None;
+            }
+            let mut len = 0usize;
+            for i in 0..n {
+                len = (len << 8) | buf[pos + 2 + i] as usize;
+            }
+            (len, 2 + n)
+        };
+        let start = pos + header;
+        if start + len > buf.len() {
+            return None;
+        }
+        Some((tag, start, len))
+    }
+
+    /// Достаёт OID алгоритма шифрования содержимого из CMS EnvelopedData.
+    ///
+    /// Путь: SEQUENCE → [0] → SEQUENCE → version, recipientInfos,
+    /// encryptedContentInfo { contentType, algorithm { OID, params }, … }.
+    fn content_cipher_oid(der: &[u8]) -> Option<Vec<u8>> {
+        let (tag, start, _) = tlv(der, 0)?;
+        if tag != 0x30 {
+            return None;
+        }
+        let (t1, s1, l1) = tlv(der, start)?; // OID envelopedData
+        if t1 != 0x06 {
+            return None;
+        }
+        let (t2, s2, _) = tlv(der, s1 + l1)?; // [0] EXPLICIT
+        if t2 != 0xA0 {
+            return None;
+        }
+        let (t3, s3, _) = tlv(der, s2)?; // SEQUENCE EnvelopedData
+        if t3 != 0x30 {
+            return None;
+        }
+        let (_, s4, l4) = tlv(der, s3)?; // INTEGER version
+        let (t5, s5, l5) = tlv(der, s4 + l4)?; // SET recipientInfos
+        if t5 != 0x31 {
+            return None;
+        }
+        let (t6, s6, _) = tlv(der, s5 + l5)?; // SEQUENCE encryptedContentInfo
+        if t6 != 0x30 {
+            return None;
+        }
+        let (_, s7, l7) = tlv(der, s6)?; // OID contentType
+        let (t8, s8, _) = tlv(der, s7 + l7)?; // SEQUENCE algorithm
+        if t8 != 0x30 {
+            return None;
+        }
+        let (t9, s9, l9) = tlv(der, s8)?; // OID алгоритма
+        if t9 != 0x06 {
+            return None;
+        }
+        Some(der[s9..s9 + l9].to_vec())
+    }
+
+    /// Определяет алгоритм по OID из контейнера (без эвристик по байтам).
+    fn detect_cipher(der: &[u8]) -> Option<Cipher> {
+        let oid = content_cipher_oid(der)?;
+        match oid.as_slice() {
+            [0x2A, 0x85, 0x03, 0x07, 0x01, 0x01, 0x05, 0x02] => Some(Cipher::Kuznyechik),
+            [0x2A, 0x85, 0x03, 0x07, 0x01, 0x01, 0x05, 0x01] => Some(Cipher::Magma),
+            [0x2A, 0x85, 0x03, 0x02, 0x02, 0x15] => Some(Cipher::Gost28147),
+            _ => None,
         }
     }
 
     fn encrypt_with(
         certs: &[PCertContext],
         oid: &str,
-        params: &mut [u8],
         data: &[u8],
-        prov: Handle,
     ) -> std::result::Result<Vec<u8>, String> {
         let oid_c = CString::new(oid).map_err(|e| e.to_string())?;
         let para = CryptEncryptMessagePara {
@@ -155,13 +230,10 @@ mod win {
             h_crypt_prov: 0,
             content_encryption_algorithm: CryptAlgorithmIdentifier {
                 psz_obj_id: oid_c.as_ptr(),
+                // Параметры (IV) генерирует сам CSP — фиксированный IV нельзя.
                 parameters: CryptDataBlob {
-                    cb_data: params.len() as u32,
-                    pb_data: if params.is_empty() {
-                        std::ptr::null_mut()
-                    } else {
-                        params.as_mut_ptr()
-                    },
+                    cb_data: 0,
+                    pb_data: std::ptr::null_mut(),
                 },
             },
             pv_encryption_aux_info: std::ptr::null_mut(),
@@ -214,93 +286,39 @@ mod win {
         let data = std::fs::read(input)
             .map_err(|e| CryptolineError::FileError(format!("{}: {}", input.display(), e)))?;
 
-        let mut contexts: Vec<PCertContext> = Vec::new();
+        let mut guards: Vec<CertCtx> = Vec::new();
         for der in certs {
-            let ctx = unsafe {
-                CertCreateCertificateContext(X509_ASN_ENCODING, der.as_ptr(), der.len() as u32)
-            };
-            if ctx.is_null() {
-                for c in &contexts {
-                    unsafe { CertFreeCertificateContext(*c) };
-                }
-                return Err(CryptolineError::CertificateError(format!(
+            let guard = CertCtx::create(der).ok_or_else(|| {
+                CryptolineError::CertificateError(format!(
                     "сертификат получателя не разобран: {}",
                     last_error()
-                )));
-            }
-            contexts.push(ctx);
+                ))
+            })?;
+            guards.push(guard);
         }
-
-        // Прогреваем провайдер КриптоПро: без него CryptoAPI не создаст
-        // сессионный ключ для ГОСТ-алгоритма.
-        let mut prov: Handle = 0;
-        let provider = CString::new("Crypto-Pro GOST R 34.10-2012 Cryptographic Service Provider")
-            .ok();
-        unsafe {
-            if CryptAcquireContextA(
-                &mut prov,
-                std::ptr::null(),
-                provider
-                    .as_ref()
-                    .map(|c| c.as_ptr())
-                    .unwrap_or(std::ptr::null()),
-                PROV_GOST_2012_256,
-                CRYPT_VERIFYCONTEXT | CRYPT_SILENT,
-            ) == 0
-            {
-                prov = 0;
-            }
-        }
+        let contexts: Vec<PCertContext> = guards.iter().map(|g| g.0).collect();
 
         let mut last = String::new();
         let mut result = None;
         for cipher in [Cipher::Kuznyechik, Cipher::Magma, Cipher::Gost28147] {
-            // Параметры алгоритма: SEQUENCE { IV OCTET STRING }.
-            let iv_len = match cipher {
-                Cipher::Kuznyechik => 16,
-                _ => 8,
-            };
-            let mut iv = vec![0u8; iv_len];
-            iv[0] = 0x5A; // любой ненулевой IV, CSP всё равно работает в CBC
-            let mut params = if cipher == Cipher::Kuznyechik {
-                // Для Кузнечика параметры — OCTET STRING с IV.
-                let mut p = vec![0x04, iv_len as u8];
-                p.extend_from_slice(&iv);
-                p
-            } else {
-                let mut p = vec![0x30, 0x04 + iv_len as u8, 0x04, iv_len as u8];
-                p.extend_from_slice(&iv);
-                p
-            };
-            let mut params = params.into_boxed_slice();
-
-            match encrypt_with(&contexts, cipher.oid(), &mut params, &data, prov) {
-                Ok(mut der) => {
-                    let real = detect_cipher(&der);
-                    if real != cipher {
-                        // CSP подменил алгоритм — не выдаём одно за другое.
-                        der.clear();
-                        last = format!(
-                            "{}: CSP не поддерживает этот алгоритм",
-                            cipher.title()
-                        );
-                        continue;
+            match encrypt_with(&contexts, cipher.oid(), &data) {
+                Ok(der) => match detect_cipher(&der) {
+                    Some(real) if real == cipher => {
+                        result = Some((cipher, der));
+                        break;
                     }
-                    result = Some((cipher, der));
-                    break;
-                }
+                    Some(_) => {
+                        // CSP подменил алгоритм — не выдаём одно за другое.
+                        last = format!("{}: CSP не поддерживает этот алгоритм", cipher.title());
+                    }
+                    None => {
+                        last = format!("{}: не удалось определить алгоритм в контейнере", cipher.title());
+                    }
+                },
                 Err(e) => last = format!("{}: {}", cipher.title(), e),
             }
         }
-
-        unsafe {
-            if prov != 0 {
-                CryptReleaseContext(prov, 0);
-            }
-            for c in &contexts {
-                CertFreeCertificateContext(*c);
-            }
-        }
+        drop(guards);
 
         let (cipher, der) = result.ok_or_else(|| {
             CryptolineError::CertificateError(format!("шифрование не удалось ({})", last))
