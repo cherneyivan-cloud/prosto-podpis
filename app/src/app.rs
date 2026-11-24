@@ -1738,12 +1738,12 @@ impl CryptoLineApp {
         page_header(
             ui,
             "Сертификаты",
-            "Ключи КриптоПро CSP из хранилища Windows и импортированные файлы",
+            "Ключи КриптоПро CSP из системного хранилища Windows и импортированные файлы",
         );
         ui.add_space(16.0);
 
         ui.horizontal(|ui| {
-            if accent_button(ui, "Загрузить из Windows Store", Icon::Download).clicked() {
+            if accent_button(ui, "Системное хранилище", Icon::Download).clicked() {
                 self.load_certs_from_store();
             }
             if secondary_button(ui, "Импортировать файл", Icon::Plus).clicked() {
@@ -1783,7 +1783,7 @@ impl CryptoLineApp {
                         ui,
                         Icon::Cert,
                         "Сертификаты не загружены",
-                        "Загрузите хранилище Windows или укажите файл сертификата .der / .cer / .pem",
+                        "Загрузите сертификаты из системного хранилища или укажите файл .der / .cer / .pem",
                     );
                 }
                 for i in 0..self.certificates.len() {
@@ -1833,7 +1833,7 @@ impl CryptoLineApp {
                             let source = if cert.file_path.is_some() {
                                 "Импортирован из файла"
                             } else {
-                                "Хранилище Windows · CurrentUser\\My"
+                                "Системное хранилище · CurrentUser\\My"
                             };
                             ui.add(
                                 egui::Label::new(
@@ -2658,7 +2658,13 @@ impl CryptoLineApp {
         if self.files.iter().any(|f| f.path == path) {
             return false;
         }
-        if let Some(entry) = FileEntry::from_path(path) {
+        if let Some(mut entry) = FileEntry::from_path(path) {
+            // Подписи, которые уже лежат рядом с документом, подхватываем сразу:
+            // иначе кнопка «Проверить подпись» не находит файл .sig.
+            entry.signatures = find_signatures_for(&entry.path);
+            if !entry.signatures.is_empty() {
+                entry.status = FileStatus::Signed;
+            }
             self.files.push(entry);
             let idx = self.files.len() - 1;
             if self.active_file.is_none() {
@@ -2977,7 +2983,7 @@ impl CryptoLineApp {
                     count += 1;
                 }
                 self.message = if count > 0 {
-                    format!("Загружено сертификатов из Windows Store: {}", count)
+                    format!("Загружено сертификатов из системного хранилища: {}", count)
                 } else {
                     "В хранилище CurrentUser\\My сертификаты не найдены".to_string()
                 };
@@ -3652,6 +3658,20 @@ impl CryptoLineApp {
         let (ok, detail) = run_verify_cli(&self.cli_path(), &file, &sig);
         if ok {
             let renamed = self.rename_after_verify(&file, &sig, &detail);
+            // Если подпись переименована — обновляем путь и в карточке документа,
+            // иначе повторная проверка ищет старый файл.
+            if let (Some(new_path), Some(idx)) = (
+                renamed.clone(),
+                self.files.iter().position(|f| f.path == file),
+            ) {
+                if let Some(entry) = self.files.get_mut(idx) {
+                    for s in &mut entry.signatures {
+                        if s.path.as_deref() == Some(sig.as_path()) {
+                            s.path = Some(new_path.clone());
+                        }
+                    }
+                }
+            }
             if let Some(parent) = file.parent() {
                 let parent = parent.to_path_buf();
                 let _ = self.write_reports(&parent);
@@ -4741,6 +4761,72 @@ fn is_signature_path(path: &Path) -> bool {
             .as_deref(),
         Some("sig") | Some("p7s") | Some("sgn")
     )
+}
+
+/// Ищет файлы подписи, которые уже лежат рядом с документом.
+///
+/// Подходят `<имя>.pdf.sig`, `<имя>.sig` и `<имя>_Фамилия_ИО.sig` —
+/// последний вариант появляется после переименования при проверке.
+fn find_signatures_for(doc: &Path) -> Vec<SignatureInfo> {
+    let mut out = Vec::new();
+    let (Some(dir), Some(stem), Some(full)) = (
+        doc.parent(),
+        doc.file_stem().and_then(|s| s.to_str()),
+        doc.file_name().and_then(|s| s.to_str()),
+    ) else {
+        return out;
+    };
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || !is_signature_path(&path) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let is_pair = name == format!("{}.sig", full)
+            || name == format!("{}.p7s", full)
+            || name == format!("{}.sgn", full)
+            || name == format!("{}.sig", stem)
+            || name == format!("{}.p7s", stem)
+            || name == format!("{}.sgn", stem)
+            || name.starts_with(&format!("{}_", stem));
+        if !is_pair {
+            continue;
+        }
+
+        let base = name
+            .trim_end_matches(".sig")
+            .trim_end_matches(".p7s")
+            .trim_end_matches(".sgn");
+        let subject = base
+            .strip_prefix(&format!("{}_", stem))
+            .map(|s| s.replace('_', " "))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Подпись".to_string());
+
+        let signed_at = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .map(|t| {
+                let dt: chrono::DateTime<chrono::Local> = t.into();
+                dt.format("%d.%m.%Y · %H:%M").to_string()
+            })
+            .unwrap_or_else(|_| "—".to_string());
+
+        out.push(SignatureInfo {
+            subject,
+            path: Some(path),
+            signed_at,
+        });
+    }
+
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
 }
 
 /// Ключ имени для сопоставления: без расширений, только буквы и цифры.
