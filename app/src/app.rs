@@ -298,6 +298,7 @@ pub struct CryptoLineApp {
     hash_rx: Option<mpsc::Receiver<(usize, String)>>,
     sign_rx: Option<mpsc::Receiver<SignOutcome>>,
     signing: Option<SignState>,
+    sign_ok_at: Option<f64>,
 
     verify_docs: Vec<PathBuf>,
     verify_sigs: Vec<PathBuf>,
@@ -306,6 +307,7 @@ pub struct CryptoLineApp {
     confirm_delete: bool,
     titlebar_applied: bool,
     logo: Option<egui::TextureHandle>,
+    logo_start: Option<f64>,
     sig_tex: Option<egui::TextureHandle>,
     splash_start: Option<f64>,
     splash_skip: bool,
@@ -385,12 +387,14 @@ impl Default for CryptoLineApp {
             hash_rx: None,
             sign_rx: None,
             signing: None,
+            sign_ok_at: None,
             verify_docs: Vec::new(),
             verify_sigs: Vec::new(),
             verify_items: Vec::new(),
             confirm_delete: false,
             titlebar_applied: false,
             logo: None,
+            logo_start: None,
             sig_tex: None,
             splash_start: None,
             splash_skip: false,
@@ -730,21 +734,56 @@ impl CryptoLineApp {
             let logo_h = 36.0;
             let logo_w = logo_h * crate::LOGO_W as f32 / crate::LOGO_H as f32;
             let (rect, logo_resp) =
-                ui.allocate_exact_size(Vec2::new(logo_w + 2.0, 44.0), Sense::hover());
-            let hover = ui
-                .ctx()
-                .animate_bool_with_time(egui::Id::new("logo_hover"), logo_resp.hovered(), 0.2);
+                ui.allocate_exact_size(Vec2::new(logo_w + 2.0, 44.0), Sense::click());
+            let hover = ease_out_cubic(ui.ctx().animate_bool_with_time(
+                egui::Id::new("logo_hover"),
+                logo_resp.hovered(),
+                dur(FAST),
+            ));
+            // Клик по логотипу повторяет анимацию прорисовки.
+            if logo_resp.clicked() {
+                self.logo_start = None;
+            }
+            let now = ui.input(|i| i.time);
+            let start = *self.logo_start.get_or_insert(now);
+            let draw = ease_out_cubic(((now - start) as f32 / 0.6).clamp(0.0, 1.0));
+            if draw < 1.0 {
+                ui.ctx().request_repaint();
+            }
+
             let scale = 1.0 + 0.04 * hover;
             let logo_rect = Rect::from_center_size(
                 rect.center(),
                 Vec2::new(logo_w * scale, logo_h * scale),
             );
-            ui.painter().image(
-                texture.id(),
-                logo_rect,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            if draw < 1.0 {
+                // Прорисовка росчерка: текстура проявляется слева направо.
+                let steps = 18;
+                for i in 0..steps {
+                    let f0 = i as f32 / steps as f32;
+                    let f1 = (i + 1) as f32 / steps as f32;
+                    let a = ((draw * 1.15 - f0) / 0.2).clamp(0.0, 1.0);
+                    if a <= 0.01 {
+                        continue;
+                    }
+                    ui.painter().image(
+                        texture.id(),
+                        Rect::from_min_max(
+                            Pos2::new(logo_rect.left() + logo_rect.width() * f0, logo_rect.top()),
+                            Pos2::new(logo_rect.left() + logo_rect.width() * f1, logo_rect.bottom()),
+                        ),
+                        Rect::from_min_max(Pos2::new(f0, 0.0), Pos2::new(f1, 1.0)),
+                        Color32::from_white_alpha((a * 255.0) as u8),
+                    );
+                }
+            } else {
+                ui.painter().image(
+                    texture.id(),
+                    logo_rect,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
             ui.add_space(11.0);
             ui.label(
                 RichText::new("Просто Подпись")
@@ -768,11 +807,11 @@ impl CryptoLineApp {
         let start_y = ui.cursor().min.y + 20.0;
         let active_index = navs.iter().position(|n| *n == self.active_nav).unwrap_or(0);
         let target_y = start_y + active_index as f32 * row_height;
-        let indicator_y = ui.ctx().animate_value_with_time(
+        let indicator_y = ease_out_cubic(ui.ctx().animate_value_with_time(
             egui::Id::new("nav_indicator"),
             target_y,
-            0.24,
-        );
+            dur(NORMAL),
+        ));
 
         for (index, nav) in navs.into_iter().enumerate() {
             self.nav_item(ui, nav, index);
@@ -1316,12 +1355,16 @@ impl CryptoLineApp {
         let selected = self.selected_files.contains(&idx);
 
         // Плавный подъём выбранной карточки: фон, смещение и тень.
-        let lift = ui
-            .ctx()
-            .animate_bool_with_time(egui::Id::new(("card_lift", idx)), active, 0.2);
-        let hover_t = ui
-            .ctx()
-            .animate_bool_with_time(egui::Id::new(("card_hover", idx)), hovered && !active, 0.15);
+        let lift = ease_out_cubic(ui.ctx().animate_bool_with_time(
+            egui::Id::new(("card_lift", idx)),
+            active,
+            dur(NORMAL),
+        ));
+        let hover_t = ease_out_cubic(ui.ctx().animate_bool_with_time(
+            egui::Id::new(("card_hover", idx)),
+            hovered && !active,
+            dur(FAST),
+        ));
         let offset = -1.6 * lift;
         let card = Rect::from_min_max(
             rect.min + Vec2::new(0.0, 2.0 + offset),
@@ -1390,7 +1433,14 @@ impl CryptoLineApp {
             status == FileStatus::Encrypted,
             0.25,
         );
-        let status_color = blend_status(AMBER, GREEN, ACCENT, pending_t, signed_t, encrypted_t);
+        let status_color = blend_status(
+            STATUS_QUEUED,
+            STATUS_SIGNED,
+            ACCENT,
+            pending_t,
+            signed_t,
+            encrypted_t,
+        );
 
         let chip_galley = ui.fonts(|fonts| {
             fonts.layout_no_wrap(
@@ -1701,11 +1751,11 @@ impl CryptoLineApp {
 
     fn floating_panel(&mut self, ctx: &egui::Context) {
         // Панель плавно выезжает снизу; при закрытии уезжает обратно.
-        let slide = ctx.animate_bool_with_time(
-            egui::Id::new("sign_panel_slide"),
+        let slide = ease_in_out_cubic(ctx.animate_bool_with_time(
+            egui::Id::new("sign_panel_open"),
             self.panel_open,
-            0.26,
-        );
+            dur(PANEL),
+        ));
         if !self.panel_open && slide <= 0.001 {
             return;
         }
@@ -1824,6 +1874,18 @@ impl CryptoLineApp {
             ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
                 if self.signing.is_some() {
                     sign_spinner(ui);
+                } else if let Some(at) = self.sign_ok_at {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0);
+                    let t = ((now - at) / 1.4).clamp(0.0, 1.0) as f32;
+                    if t < 1.0 {
+                        sign_success(ui, 1.0 - t);
+                        ui.ctx().request_repaint_after(Duration::from_millis(33));
+                    } else {
+                        self.sign_ok_at = None;
+                    }
                 } else if action_button(ui, Icon::Pen).clicked() {
                     self.sign_selected();
                 }
@@ -3868,6 +3930,12 @@ impl CryptoLineApp {
         if report_errors > 0 {
             text.push_str(&format!(" · ошибок отчётов: {}", report_errors));
         }
+        if state.errors == 0 {
+            self.sign_ok_at = Some(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0));
+        }
         self.message = text;
     }
 
@@ -4328,21 +4396,9 @@ fn rounded_rect_path(rect: Rect, r: f32) -> Vec<Pos2> {
     pts
 }
 
-/// Цвет с масштабированной прозрачностью.
+/// Цвет с масштабированной прозрачностью (алиас тематического хелпера).
 fn fade_col(c: Color32, f: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * f.clamp(0.0, 1.0)) as u8)
-}
-
-/// Линейная интерполяция цвета (t = 0..1).
-fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
-    let t = t.clamp(0.0, 1.0);
-    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
-    Color32::from_rgba_unmultiplied(
-        mix(a.r(), b.r()),
-        mix(a.g(), b.g()),
-        mix(a.b(), b.b()),
-        mix(a.a(), b.a()),
-    )
+    with_alpha(c, f)
 }
 
 /// Смешивает три цвета по весам — для плавной смены статуса.
@@ -4497,6 +4553,24 @@ fn sign_spinner(ui: &mut Ui) {
     }
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_millis(33));
+}
+
+/// Кнопка после успешного подписания: галочка с плавным появлением.
+fn sign_success(ui: &mut Ui, life: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(58.0), Sense::hover());
+    let p = ui.painter();
+    let c = rect.center();
+    paint_round_shadow(p, c, 29.0);
+    p.circle_filled(c, 29.0, ACCENT);
+    let pop = (1.0 - life).min(1.0);
+    let scale = 1.0 + 0.08 * pop;
+    icons::paint(
+        p,
+        Rect::from_center_size(c, Vec2::splat(26.0 * scale)),
+        Icon::Check,
+        Color32::WHITE,
+        2.4,
+    );
 }
 
 fn action_button(ui: &mut Ui, icon: Icon) -> Response {
@@ -4954,9 +5028,11 @@ fn toggle_row(ui: &mut Ui, value: &mut bool, label: &str) -> Response {
         Vec2::new(36.0, 20.0),
     );
     // Плавное скольжение бегунка и перелив цвета трека.
-    let t = ui
-        .ctx()
-        .animate_bool_with_time(egui::Id::new(("toggle", label)), *value, 0.2);
+    let t = ease_out_cubic(ui.ctx().animate_bool_with_time(
+        egui::Id::new(("toggle", label)),
+        *value,
+        dur(FAST + 0.02),
+    ));
     p.rect_filled(
         track,
         Rounding::same(10.0),

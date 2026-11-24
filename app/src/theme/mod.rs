@@ -8,6 +8,12 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 
+pub mod animation;
+pub use animation::{
+    animate_bool, animate_value, dur, ease_in_out_cubic, ease_out_cubic, lerp_color,
+    reduced_motion, set_reduced_motion, with_alpha, FAST, NORMAL, PANEL,
+};
+
 // --- Поверхности ---------------------------------------------------------
 
 pub const BG_WINDOW: Color32 = Color32::from_rgb(0x23, 0x25, 0x30);
@@ -20,6 +26,9 @@ pub const BG_PANEL: Color32 = Color32::from_rgb(0x30, 0x33, 0x41);
 pub const BG_CHIP: Color32 = Color32::from_rgb(0x2E, 0x31, 0x42);
 pub const BG_ROW_HOVER: Color32 = Color32::from_rgb(0x30, 0x33, 0x42);
 pub const BG_ACTIVE_ROW: Color32 = Color32::from_rgb(0x2A, 0x2C, 0x38);
+
+/// Самый тёмный тон сайдбара из референса.
+pub const BG_SIDEBAR_DARK: Color32 = Color32::from_rgb(0x1B, 0x1D, 0x28);
 
 // --- Акцент и текст ------------------------------------------------------
 
@@ -44,6 +53,11 @@ pub const TEAL: Color32 = Color32::from_rgb(0x3E, 0xA9, 0xC9);
 pub const PURPLE: Color32 = Color32::from_rgb(0x7A, 0x5A, 0xF8);
 pub const PDF_RED: Color32 = Color32::from_rgb(0xE0, 0x4F, 0x5F);
 pub const ZIP_YELLOW: Color32 = Color32::from_rgb(0xE3, 0xBE, 0x4E);
+
+/// Статус «Документ в очереди» из референса.
+pub const STATUS_QUEUED: Color32 = Color32::from_rgb(0x2D, 0xD4, 0xBF);
+/// Статус «Подписан» из референса.
+pub const STATUS_SIGNED: Color32 = Color32::from_rgb(0x10, 0xB9, 0x81);
 
 // --- Типографика ---------------------------------------------------------
 
