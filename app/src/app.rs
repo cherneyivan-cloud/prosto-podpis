@@ -832,11 +832,11 @@ impl CryptoLineApp {
         let start_y = ui.cursor().min.y + 20.0;
         let active_index = navs.iter().position(|n| *n == self.active_nav).unwrap_or(0);
         let target_y = start_y + active_index as f32 * row_height;
-        let indicator_y = ease_out_cubic(ui.ctx().animate_value_with_time(
+        let indicator_y = ui.ctx().animate_value_with_time(
             egui::Id::new("nav_indicator"),
             target_y,
             dur(NORMAL),
-        ));
+        );
 
         for (index, nav) in navs.into_iter().enumerate() {
             self.nav_item(ui, nav, index);
